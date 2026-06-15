@@ -790,7 +790,9 @@ describe("NewChatLandingScreen", () => {
     expect(screen.queryByTestId("new-chat-landing-sandbox-option")).toBeNull();
     fireEvent.focus(screen.getByLabelText("Why New Sandbox is unavailable"));
     await waitFor(() =>
-      expect(screen.getAllByText("Managed sandboxes are disabled in this workspace.").length).toBeGreaterThan(0),
+      expect(
+        screen.getAllByText("Managed sandboxes are disabled in this workspace.").length,
+      ).toBeGreaterThan(0),
     );
   });
 
@@ -1000,7 +1002,9 @@ describe("NewChatLandingScreen", () => {
     expect(helpButton).toBeTruthy();
     fireEvent.focus(helpButton);
     await waitFor(() =>
-      expect(screen.getAllByText("Use Databricks Git credentials before cloning.").length).toBeGreaterThan(0),
+      expect(
+        screen.getAllByText("Use Databricks Git credentials before cloning.").length,
+      ).toBeGreaterThan(0),
     );
   });
 

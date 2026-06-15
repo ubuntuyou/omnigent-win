@@ -12,12 +12,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "@/lib/routing";
-import {
-  PlusIcon,
-  RefreshCwIcon,
-  ShieldCheckIcon,
-  TrashIcon,
-} from "lucide-react";
+import { PlusIcon, RefreshCwIcon, ShieldCheckIcon, TrashIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -35,10 +30,7 @@ import {
   useDeleteDefaultPolicy,
   type DefaultPolicy,
 } from "@/hooks/useDefaultPolicies";
-import {
-  usePolicyRegistry,
-  type PolicyRegistryEntry,
-} from "@/hooks/usePolicies";
+import { usePolicyRegistry, type PolicyRegistryEntry } from "@/hooks/usePolicies";
 import { getMe } from "@/lib/accountsApi";
 import { coercePolicyParams } from "@/lib/policyParams";
 
@@ -59,9 +51,7 @@ function AddDefaultPolicyDialog({
 }) {
   const [selected, setSelected] = useState<string>("");
   const [filter, setFilter] = useState("");
-  const [factoryParams, setFactoryParams] = useState<Record<string, string>>(
-    {},
-  );
+  const [factoryParams, setFactoryParams] = useState<Record<string, string>>({});
   const [paramError, setParamError] = useState<string | null>(null);
   const addPolicy = useAddDefaultPolicy();
 
@@ -106,9 +96,7 @@ function AddDefaultPolicyDialog({
     }
     setParamError(null);
     const includeFactoryParams =
-      entry.kind === "factory"
-        ? { factory_params: parsedParams ?? {} }
-        : {};
+      entry.kind === "factory" ? { factory_params: parsedParams ?? {} } : {};
     addPolicy.mutate(
       {
         name: entry.name.toLowerCase().replace(/\s+/g, "_"),
@@ -131,16 +119,12 @@ function AddDefaultPolicyDialog({
       <DialogContent className="max-h-[80vh] overflow-y-auto sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Add Global Policy</DialogTitle>
-          <DialogDescription>
-            Choose a policy to apply globally to all sessions.
-          </DialogDescription>
+          <DialogDescription>Choose a policy to apply globally to all sessions.</DialogDescription>
         </DialogHeader>
         <div className="space-y-3 pt-1">
           {!selected &&
             (() => {
-              const available = registry.filter(
-                (r) => !appliedHandlers.has(r.handler),
-              );
+              const available = registry.filter((r) => !appliedHandlers.has(r.handler));
               const lowerFilter = filter.toLowerCase();
               const filtered = lowerFilter
                 ? available.filter(
@@ -204,9 +188,7 @@ function AddDefaultPolicyDialog({
                 </button>
               </div>
               {entry.description && (
-                <p className="text-xs text-muted-foreground">
-                  {entry.description}
-                </p>
+                <p className="text-xs text-muted-foreground">{entry.description}</p>
               )}
             </div>
           )}
@@ -217,9 +199,7 @@ function AddDefaultPolicyDialog({
                 return (
                   <div key={key}>
                     <label className="flex items-center gap-1 text-xs text-muted-foreground">
-                      <span className="font-medium text-foreground">
-                        {key}
-                      </span>
+                      <span className="font-medium text-foreground">{key}</span>
                       {prop?.type && (
                         <span>
                           (
@@ -233,17 +213,13 @@ function AddDefaultPolicyDialog({
                       )}
                     </label>
                     {prop?.description && (
-                      <p className="text-[11px] text-muted-foreground">
-                        {prop.description}
-                      </p>
+                      <p className="text-[11px] text-muted-foreground">{prop.description}</p>
                     )}
                     {prop?.type === "boolean" ? (
                       <select
                         value={
                           factoryParams[key] ??
-                          (prop?.default !== undefined
-                            ? String(prop.default)
-                            : "")
+                          (prop?.default !== undefined ? String(prop.default) : "")
                         }
                         onChange={(e) =>
                           setFactoryParams((prev) => ({
@@ -262,7 +238,7 @@ function AddDefaultPolicyDialog({
                           factoryParams[key] ??
                           (prop?.default !== undefined
                             ? String(prop.default)
-                            : prop.enum[0] ?? "")
+                            : (prop.enum[0] ?? ""))
                         }
                         onChange={(e) =>
                           setFactoryParams((prev) => ({
@@ -288,10 +264,7 @@ function AddDefaultPolicyDialog({
                               : [];
                           const checked = current.includes(v);
                           return (
-                            <label
-                              key={v}
-                              className="flex items-center gap-1 text-sm"
-                            >
+                            <label key={v} className="flex items-center gap-1 text-sm">
                               <input
                                 type="checkbox"
                                 checked={checked}
@@ -314,9 +287,7 @@ function AddDefaultPolicyDialog({
                     ) : (
                       <input
                         type={
-                          prop?.type === "integer" || prop?.type === "number"
-                            ? "number"
-                            : "text"
+                          prop?.type === "integer" || prop?.type === "number" ? "number" : "text"
                         }
                         placeholder={
                           prop?.type === "array"
@@ -385,9 +356,7 @@ export function PoliciesPage() {
   const updatePolicy = useUpdateDefaultPolicy();
   const deletePolicy = useDeleteDefaultPolicy();
   const [addOpen, setAddOpen] = useState(false);
-  const [deleteCandidate, setDeleteCandidate] = useState<DefaultPolicy | null>(
-    null,
-  );
+  const [deleteCandidate, setDeleteCandidate] = useState<DefaultPolicy | null>(null);
   const [pendingAction, setPendingAction] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -465,10 +434,7 @@ export function PoliciesPage() {
             const params = p.factory_params;
             const hasParams = params != null && Object.keys(params).length > 0;
             return (
-              <div
-                key={p.id}
-                className="rounded-lg border border-border bg-background p-4"
-              >
+              <div key={p.id} className="rounded-lg border border-border bg-background p-4">
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex items-start gap-2.5 min-w-0">
                     <ShieldCheckIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
@@ -571,8 +537,8 @@ export function PoliciesPage() {
           <DialogHeader>
             <DialogTitle>Remove {deleteCandidate?.name}?</DialogTitle>
             <DialogDescription>
-              This removes the global policy from all sessions. Existing
-              session-level policies with the same handler are unaffected.
+              This removes the global policy from all sessions. Existing session-level policies with
+              the same handler are unaffected.
             </DialogDescription>
           </DialogHeader>
           {actionError !== null && (

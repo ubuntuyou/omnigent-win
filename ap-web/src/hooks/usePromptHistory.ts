@@ -68,10 +68,7 @@ function writeHistory(key: string, entries: string[]): void {
  * @returns The new persisted history (unchanged on a skipped duplicate), or
  *   `null` when `text` was empty/whitespace and nothing was written.
  */
-export function appendPromptHistoryEntry(
-  text: string,
-  scope?: string | null,
-): string[] | null {
+export function appendPromptHistoryEntry(text: string, scope?: string | null): string[] | null {
   const trimmed = text.trim();
   if (!trimmed) return null;
   const key = scopedKey(scope);

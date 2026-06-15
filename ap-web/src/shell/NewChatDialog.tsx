@@ -1449,31 +1449,31 @@ export function NewChatLandingScreen() {
                           </Tooltip>
                         </DropdownMenuItem>
                       )}
-                    <DropdownMenuSeparator />
-                  </>
-                )}
-                {allHosts.length === 0 && (
-                  <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                    No hosts connected yet.
-                  </div>
-                )}
-                {onlineHosts.map((host) => (
-                  <DropdownMenuItem
-                    key={host.host_id}
-                    onSelect={() => selectHost(host.host_id)}
-                    data-active={host.host_id === selectedHostId ? "true" : undefined}
-                    className="text-xs data-[active=true]:bg-accent/60"
-                  >
-                    <HostOption host={host} />
-                  </DropdownMenuItem>
-                ))}
-                {offlineHosts.map((host) => (
-                  <DropdownMenuItem key={host.host_id} disabled className="text-xs">
-                    <HostOption host={host} />
-                  </DropdownMenuItem>
-                ))}
-                {allHosts.length > 0 && <DropdownMenuSeparator />}
-                {/* Persistent escape hatch: open the connect-a-host
+                      <DropdownMenuSeparator />
+                    </>
+                  )}
+                  {allHosts.length === 0 && (
+                    <div className="px-2 py-1.5 text-xs text-muted-foreground">
+                      No hosts connected yet.
+                    </div>
+                  )}
+                  {onlineHosts.map((host) => (
+                    <DropdownMenuItem
+                      key={host.host_id}
+                      onSelect={() => selectHost(host.host_id)}
+                      data-active={host.host_id === selectedHostId ? "true" : undefined}
+                      className="text-xs data-[active=true]:bg-accent/60"
+                    >
+                      <HostOption host={host} />
+                    </DropdownMenuItem>
+                  ))}
+                  {offlineHosts.map((host) => (
+                    <DropdownMenuItem key={host.host_id} disabled className="text-xs">
+                      <HostOption host={host} />
+                    </DropdownMenuItem>
+                  ))}
+                  {allHosts.length > 0 && <DropdownMenuSeparator />}
+                  {/* Persistent escape hatch: open the connect-a-host
                     instructions. Present even with zero hosts so a fresh user
                     is never stuck. */}
                   <DropdownMenuItem
@@ -1512,29 +1512,29 @@ export function NewChatLandingScreen() {
                   <PopoverContent align="start" className="w-96 p-3">
                     <div className="flex flex-col gap-2">
                       <div className="flex items-center gap-1.5">
-                      <label
-                        htmlFor="landing-repo-url"
-                        className="text-xs font-medium text-foreground"
-                      >
-                        Repository (optional)
-                      </label>
-                      {databricksGitCredentialsTooltipContent && (
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <button
-                              type="button"
-                              className="inline-flex size-4 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground"
-                              aria-label="How to set up Databricks git credentials"
-                            >
-                              <CircleHelpIcon className="size-3.5" />
-                            </button>
-                          </TooltipTrigger>
-                          <TooltipContent className="max-w-64">
-                            {databricksGitCredentialsTooltipContent}
-                          </TooltipContent>
-                        </Tooltip>
-                      )}
-                    </div>
+                        <label
+                          htmlFor="landing-repo-url"
+                          className="text-xs font-medium text-foreground"
+                        >
+                          Repository (optional)
+                        </label>
+                        {databricksGitCredentialsTooltipContent && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <button
+                                type="button"
+                                className="inline-flex size-4 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground"
+                                aria-label="How to set up Databricks git credentials"
+                              >
+                                <CircleHelpIcon className="size-3.5" />
+                              </button>
+                            </TooltipTrigger>
+                            <TooltipContent className="max-w-64">
+                              {databricksGitCredentialsTooltipContent}
+                            </TooltipContent>
+                          </Tooltip>
+                        )}
+                      </div>
                       <input
                         id="landing-repo-url"
                         type="text"
