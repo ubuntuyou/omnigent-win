@@ -418,7 +418,7 @@ skips:
     cluster: repl-pexpect-cli
     mode: skip
   - id: tests/e2e/omnigent/test_run_omnigent_example_agents.py::test_run_omnigent_example_yaml[agent_with_tools_calculate]
-    reason: "Shard 3 bulk: run_omnigent example-yaml agent_with_tools_calculate."
+    reason: "Flaky on gateway flake-stress (7/8 pass); intermittent tool/harness behavior, keep suppressed until stable."
     issue: 532
     cluster: run-ap-examples-harness
     mode: skip
@@ -454,7 +454,7 @@ skips:
     mode: skip
 
   - id: tests/e2e/omnigent/test_run_omnigent_quiet_startup.py::test_run_prompt_mode_is_headless_for_local_agent
-    reason: "Shard 3 bulk: run_omnigent quiet-startup headless mode."
+    reason: "fixture uses claude-sdk harness which 401s on the gateway (~/.databrickscfg auth); needs a gateway-compatible harness/model."
     issue: 532
     cluster: run-ap-examples-harness
     mode: skip
@@ -555,11 +555,6 @@ skips:
     cluster: repl-pexpect-cli
     mode: skip
 
-  - id: tests/e2e/omnigent/test_run_omnigent_quiet_startup.py::test_run_omnigent_startup_does_not_leak_server_logs
-    reason: "Nightly bulk: run_omnigent CLI cluster."
-    issue: 532
-    cluster: run-ap-examples-harness
-    mode: skip
   - id: tests/e2e/omnigent/test_run_omnigent_supervisor.py::test_supervisor_atlassian_returns_jira_issue
     reason: "Nightly bulk: run_omnigent supervisor; example yaml path / atlassian / google_drive."
     issue: 532
@@ -570,17 +565,6 @@ skips:
     reason: "Nightly bulk: run_omnigent supervisor; example yaml path / atlassian / google_drive."
     issue: 532
     cluster: subagent-supervisor-routing
-    mode: skip
-
-  - id: tests/e2e/omnigent/test_run_omnigent_url_linkify.py::test_run_omnigent_url_linkify_emits_osc_8_in_pty
-    reason: "Nightly bulk: run_omnigent CLI cluster."
-    issue: 532
-    cluster: run-ap-examples-harness
-    mode: skip
-  - id: tests/e2e/omnigent/test_serve_smoke.py::test_serve_smoke_one_chat_round_trip
-    reason: "Nightly bulk: serve-flags / serve-smoke cluster."
-    issue: 532
-    cluster: run-ap-examples-harness
     mode: skip
 
   - id: tests/e2e/omnigent/test_server_remote_omnigent_autonomous_flows.py::test_manual_server_remote_omnigent_notify_when_idle_does_not_hang_and_delivers
@@ -687,7 +671,7 @@ skips:
     mode: skip
 
   - id: tests/e2e/omnigent/test_yaml_hello_world.py::test_yaml_agent_with_tools[openai-agents]
-    reason: "Same tool-call-rendering issue as the [claude-sdk] variant."
+    reason: "Flaky on gateway flake-stress (7/8 pass); intermittent tool-call lifecycle rendering, keep suppressed until stable."
     issue: 532
     cluster: run-ap-examples-harness
     mode: skip
