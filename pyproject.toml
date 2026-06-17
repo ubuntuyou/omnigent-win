@@ -118,6 +118,10 @@ cwsandbox = ["cwsandbox>=0.24,<1"]
 # server-managed `sandbox.provider: e2b`).
 # Same lazy-import posture as above.
 e2b = ["e2b>=2.26,<3"]
+# NVIDIA OpenShell launcher (`omnigent sandbox --provider openshell`).
+# Self-hosted gRPC gateway; the SDK pulls grpcio + protobuf. Same
+# lazy-import posture as above. Pre-1.0 SDK: pin minor.
+openshell = ["openshell>=0.0.7,<1"]
 # MLflow tracing is opt-in: tracing is disabled by default and the
 # server degrades gracefully when mlflow is absent, so the (heavy) mlflow
 # dependency only installs for users who want it (`omnigent[tracing]`).
@@ -488,6 +492,17 @@ ignore_missing_imports = true
 # modal above.
 [[tool.mypy.overrides]]
 module = "e2b.*"
+ignore_missing_imports = true
+
+# openshell is an optional dep (the `openshell` extra); same lazy-import
+# posture as modal above. grpc rides in via the openshell SDK and is not
+# a base dependency, so its imports are unresolved in the default env too.
+[[tool.mypy.overrides]]
+module = "openshell.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "grpc.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
