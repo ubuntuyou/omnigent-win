@@ -51,7 +51,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib import error, request
 
-from omnigent._platform import stable_user_id
+import socket as _socket
+
+from omnigent._platform import IS_WINDOWS, stable_user_id
 from omnigent.claude_native_message_display_hook import MESSAGE_DELTAS_FILE
 
 if TYPE_CHECKING:
@@ -676,13 +678,18 @@ def _ensure_secure_dir(target: Path) -> None:
             raise RuntimeError(f"refusing to use bridge ancestor {ancestor!s}: is a symlink")
         if not stat.S_ISDIR(st.st_mode):
             raise RuntimeError(f"refusing to use bridge ancestor {ancestor!s}: not a directory")
-        if st.st_uid != my_uid:
-            raise RuntimeError(
-                f"refusing to use bridge ancestor {ancestor!s}: owned by uid "
-                f"{st.st_uid}, not current user ({my_uid})"
-            )
-        if (st.st_mode & 0o077) != 0:
-            os.chmod(ancestor, 0o700)
+        # The uid-ownership and group/other-mode checks are POSIX semantics
+        # (``os.getuid`` absent -> ``my_uid == -1`` on Windows, where st_uid is
+        # always 0 and permission bits don't model access — NTFS uses ACLs). Skip
+        # them there; the symlink / not-a-directory rejections above still apply.
+        if my_uid != -1:
+            if st.st_uid != my_uid:
+                raise RuntimeError(
+                    f"refusing to use bridge ancestor {ancestor!s}: owned by uid "
+                    f"{st.st_uid}, not current user ({my_uid})"
+                )
+            if (st.st_mode & 0o077) != 0:
+                os.chmod(ancestor, 0o700)
 
 
 def bridge_dir_for_bridge_id(bridge_id: str) -> Path:
@@ -2317,6 +2324,9 @@ def write_tmux_target(
     socket_path: Path,
     tmux_target: str,
     pid: int | None = None,
+    input_host: str | None = None,
+    input_port: int | None = None,
+    input_token: str | None = None,
 ) -> None:
     """
     Advertise the tmux socket + target for the Claude terminal.
@@ -2341,7 +2351,85 @@ def write_tmux_target(
     }
     if pid is not None:
         payload["pid"] = pid
+    # Windows ConPTY backend: there is no tmux socket. The runner advertises a
+    # loopback injection-server endpoint instead (see terminal_windows.py's
+    # _InjectionServer); the executor's Windows inject path connects to it.
+    # Additive — the tmux fields above are kept (placeholders on Windows) so
+    # existing readers don't break.
+    if input_host is not None and input_port is not None and input_token is not None:
+        payload["input_host"] = input_host
+        payload["input_port"] = input_port
+        payload["input_token"] = input_token
     _write_json_file(bridge_dir / _TMUX_FILE, payload)
+
+
+_INJECT_ACK_MAX_BYTES = 65536
+
+
+def _wait_for_injection_info(bridge_dir: Path, *, timeout_s: float) -> dict[str, Any]:
+    """Wait for the runner to advertise the Windows injection-server endpoint.
+
+    The Windows analogue of :func:`_wait_for_tmux_info`: the runner writes
+    ``input_host`` / ``input_port`` / ``input_token`` into ``tmux.json`` once the
+    ConPTY terminal's loopback injection server is up.
+    """
+    deadline = time.monotonic() + timeout_s
+    path = bridge_dir / _TMUX_FILE
+    while time.monotonic() < deadline:
+        payload = _read_json_file(path)
+        if isinstance(payload, dict):
+            host = payload.get("input_host")
+            port = payload.get("input_port")
+            token = payload.get("input_token")
+            if isinstance(host, str) and isinstance(port, int) and isinstance(token, str):
+                return {"host": host, "port": port, "token": token}
+        time.sleep(0.05)
+    raise RuntimeError(
+        "Claude terminal injection endpoint is not advertised yet. Wait for the "
+        "terminal to launch before sending messages from the web UI."
+    )
+
+
+def _recv_exactly(sock: "_socket.socket", n: int) -> bytes:
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise OSError("connection closed before a full frame was read")
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+def _inject_via_injection_server(
+    bridge_dir: Path, *, kind: str, content: str | None, timeout_s: float
+) -> None:
+    """Windows injection: connect to the runner's loopback server and send one
+    length-framed JSON request, raising on a non-ok ack.
+
+    The cross-process analogue of the tmux ``send-keys`` path: the ConPTY lives
+    in the runner process and the executor cannot touch it directly, so the
+    runner performs the actual readiness-gated paste and acks the result.
+    """
+    info = _wait_for_injection_info(bridge_dir, timeout_s=timeout_s)
+    req: dict[str, Any] = {"token": info["token"], "kind": kind, "timeout_s": timeout_s}
+    if content is not None:
+        req["content"] = content
+    body = json.dumps(req).encode("utf-8")
+    frame = len(body).to_bytes(4, "big") + body
+    try:
+        with _socket.create_connection(
+            (info["host"], info["port"]), timeout=timeout_s
+        ) as sock:
+            sock.sendall(frame)
+            header = _recv_exactly(sock, 4)
+            n = int.from_bytes(header, "big")
+            ack_body = _recv_exactly(sock, n) if 0 < n <= _INJECT_ACK_MAX_BYTES else b""
+        ack = json.loads(ack_body) if ack_body else {}
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Failed to inject message into Claude terminal: {exc}") from exc
+    if not (isinstance(ack, dict) and ack.get("ok")):
+        err = ack.get("error") if isinstance(ack, dict) else "unknown error"
+        raise RuntimeError(f"Claude terminal rejected the injected message: {err}")
 
 
 def inject_user_message(
@@ -2390,6 +2478,14 @@ def inject_user_message(
         invocation fails, or if the draft never leaves the input box
         after repeated submit Enters (message not delivered).
     """
+    if IS_WINDOWS:
+        # ConPTY backend: inject cross-process via the runner's loopback server
+        # (no tmux). Readiness gating + the bracketed-paste write happen on the
+        # runner side, which owns the ConPTY.
+        _inject_via_injection_server(
+            bridge_dir, kind="message", content=content, timeout_s=timeout_s
+        )
+        return
     info = _wait_for_tmux_info(bridge_dir, timeout_s=timeout_s)
     # tmux.json only means the tmux session exists; Claude Code's input
     # box mounts a few seconds later. Block until the prompt renders so
@@ -2505,6 +2601,11 @@ def inject_interrupt(
     :raises RuntimeError: If the tmux target is not advertised in
         time, or if the ``tmux send-keys`` invocation fails.
     """
+    if IS_WINDOWS:
+        _inject_via_injection_server(
+            bridge_dir, kind="interrupt", content=None, timeout_s=timeout_s
+        )
+        return
     info = _wait_for_tmux_info(bridge_dir, timeout_s=timeout_s)
     # No ``-l``: tmux must interpret ``Escape`` as a key name.
     _run_tmux(info["socket_path"], "send-keys", "-t", info["tmux_target"], "Escape")

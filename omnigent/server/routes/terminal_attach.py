@@ -79,6 +79,7 @@ from typing import Final
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, WebSocketException
 from starlette import status
 
+from omnigent._platform import IS_WINDOWS
 from omnigent.errors import OmnigentError
 from omnigent.runtime import (
     get_runner_ws_factory,
@@ -91,6 +92,7 @@ from omnigent.stores.permission_store import PermissionStore
 from omnigent.terminals.ws_bridge import (
     WS_CLOSE_INTERNAL_ERROR,
     WS_CLOSE_TERMINAL_NOT_FOUND,
+    bridge_conpty_to_websocket,
     bridge_tmux_pty_to_websocket,
 )
 
@@ -224,12 +226,21 @@ def create_terminal_attach_router(
             )
             return
 
-        await bridge_tmux_pty_to_websocket(
-            websocket,
-            socket_path=str(entry.instance.socket_path),
-            tmux_target=entry.instance.tmux_target,
-            read_only=read_only,
-        )
+        if IS_WINDOWS:
+            # Windows terminals are ConPTY-backed (no tmux socket); attach via
+            # the instance's output fan-out instead of a tmux PTY.
+            await bridge_conpty_to_websocket(
+                websocket,
+                instance=entry.instance,
+                read_only=read_only,
+            )
+        else:
+            await bridge_tmux_pty_to_websocket(
+                websocket,
+                socket_path=str(entry.instance.socket_path),
+                tmux_target=entry.instance.tmux_target,
+                read_only=read_only,
+            )
 
     return router
 

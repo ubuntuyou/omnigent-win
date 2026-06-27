@@ -741,7 +741,14 @@ def create_hosts_router(
         # FastAPI's :path converter strips the leading slash from
         # the URL match. Re-add it unless the path is tilde-prefixed
         # (~/foo stays tilde-prefixed; /Users/x becomes Users/x → /Users/x).
-        if not path.startswith("~"):
+        # A Windows absolute path (drive-letter ``C:\``/``C:/`` or UNC
+        # ``\\server\share``) has no leading slash to restore — prepending
+        # one yields the invalid ``/C:\...`` and the host's scandir fails
+        # with a 502. Leave those untouched.
+        _is_windows_abs = (
+            len(path) >= 2 and path[1] == ":" and path[0].isalpha()
+        ) or path.startswith("\\\\")
+        if not path.startswith("~") and not _is_windows_abs:
             path = "/" + path
         return await _list_host_filesystem(
             request=request,

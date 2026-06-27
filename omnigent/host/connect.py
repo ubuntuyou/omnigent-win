@@ -1554,6 +1554,18 @@ def run_host_process(
         (auth / authorization / outdated server). The
         actionable cause is printed to stderr first.
     """
+    # Detached Windows daemons inherit a cp1252-encoded stdout/stderr that
+    # can't encode the status banners below (✓, ✗, em-dash). The resulting
+    # UnicodeEncodeError used to bubble out of a status print() inside the
+    # tunnel coroutine and tear the connection down on every connect, leaving
+    # the host stuck "offline". Force UTF-8 so console output can never crash
+    # the host process. No-op on POSIX, where stdout is already UTF-8.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
     from omnigent.host.identity import CONFIG_PATH
 
     path = config_path or CONFIG_PATH

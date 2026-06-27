@@ -45,7 +45,15 @@ BRIDGE_DIR_ENV_VAR = "HARNESS_QWEN_NATIVE_BRIDGE_DIR"
 #: qwen recording (resume would mint a new id and lose history).
 _QWEN_SESSION_NAMESPACE = uuid.UUID("6b6f3d2e-9a1c-5e84-bf0a-1d7c5a2e9f43")
 
-_BRIDGE_ROOT = Path(os.environ.get("TMPDIR", "/tmp")) / f"omnigent-{os.getuid()}" / "qwen-native"
+# ``os.getuid`` is POSIX-only; on Windows this module can still be imported (the
+# claude-native security check ``_trusted_parent_for_bridge_dir`` imports it to
+# resolve a trusted root), so fall back to -1 rather than crashing at import.
+# This root is never actually used on Windows — qwen-native is POSIX-only.
+_BRIDGE_ROOT = (
+    Path(os.environ.get("TMPDIR", "/tmp"))
+    / f"omnigent-{getattr(os, 'getuid', lambda: -1)()}"
+    / "qwen-native"
+)
 _TMUX_FILE = "tmux.json"
 #: JSONL command file qwen watches (``--input-file``); we append to it.
 _INPUT_FILE = "qwen_in.jsonl"

@@ -595,7 +595,11 @@ def reap_orphaned_terminals() -> int:
 
     :returns: The number of orphaned instance dirs reaped.
     """
-    if not _tmux_available():
+    # On Windows the instances are ConPTY-backed (no tmux socket to kill), so
+    # the sweep still runs — it just rmtrees dead-owner dirs without a
+    # ``kill-server``. On POSIX without tmux there is nothing to reap.
+    tmux_ok = _tmux_available()
+    if not tmux_ok and not IS_WINDOWS:
         return 0
     reaped = 0
     for entry in _terminals_tmp_root().glob(f"{_TERMINAL_DIR_PREFIX}*"):
@@ -605,17 +609,18 @@ def reap_orphaned_terminals() -> int:
             continue
         if _process_alive(pid):
             continue
-        socket_path = entry / "tmux.sock"
-        if socket_path.exists():
-            with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-                subprocess.run(
-                    ["tmux", "-S", str(socket_path), "kill-server"],
-                    # kill-server on an already-dead server exits non-zero;
-                    # that is the common case for half-torn-down orphans.
-                    check=False,
-                    capture_output=True,
-                    timeout=_REAP_KILL_TIMEOUT_S,
-                )
+        if tmux_ok:
+            socket_path = entry / "tmux.sock"
+            if socket_path.exists():
+                with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                    subprocess.run(
+                        ["tmux", "-S", str(socket_path), "kill-server"],
+                        # kill-server on an already-dead server exits non-zero;
+                        # that is the common case for half-torn-down orphans.
+                        check=False,
+                        capture_output=True,
+                        timeout=_REAP_KILL_TIMEOUT_S,
+                    )
         shutil.rmtree(entry, ignore_errors=True)
         reaped += 1
     return reaped
@@ -1722,11 +1727,44 @@ def create_terminal_instance(
         and the resolved cwd to pass to ``launch()``.
     """
     if IS_WINDOWS:
-        raise RuntimeError(
-            "Native terminal harnesses (tmux/PTY) are not supported on Windows. "
-            "Run an SDK-based harness via `omnigent run <agent.yaml>` (e.g. the "
-            "claude-sdk, cursor, copilot, or codex harness) or use the web UI."
+        # Windows has no tmux. Build a ConPTY-backed instance instead (additive
+        # backend; see terminal_windows.py). The POSIX tmux build below is left
+        # entirely untouched. Imported lazily so pywinpty is only needed on
+        # Windows. Scope: the Claude Code web harness — fork isolation and the
+        # sandbox launcher do not apply (Windows sandbox is always ``none``).
+        from .terminal_windows import WindowsTerminalInstance
+
+        private_dir = Path(tempfile.mkdtemp(prefix=_TERMINAL_DIR_PREFIX))
+        (private_dir / _OWNER_PID_FILENAME).write_text(str(os.getpid()), encoding="utf-8")
+
+        effective_os_env_spec = build_terminal_os_env_spec(
+            spec,
+            parent_os_env_spec=parent_os_env_spec,
+            cwd_override=cwd_override,
+            sandbox_override=sandbox_override,
         )
+        if effective_os_env_spec.fork:
+            shutil.rmtree(private_dir, ignore_errors=True)
+            raise RuntimeError(
+                "Terminal fork isolation (os_env.fork) is not supported on the "
+                "Windows ConPTY backend; configure the terminal without fork."
+            )
+        cwd = Path(effective_os_env_spec.cwd or os.getcwd()).resolve()
+
+        windows_instance = WindowsTerminalInstance(
+            name=name,
+            session_key=session_key,
+            private_dir=private_dir,
+            command=spec.command or "bash",
+            args=list(spec.args),
+            env=dict(spec.env),
+            env_unset=list(spec.env_unset),
+            inherit_env=spec.inherit_env,
+            conversation_link=conversation_link,
+            scrollback=spec.scrollback,
+        )
+        return TerminalCreateResult(instance=windows_instance, cwd=cwd)
+
     if not _tmux_available():
         raise RuntimeError("tmux is not installed or not on PATH")
 

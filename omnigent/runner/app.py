@@ -78,6 +78,7 @@ from omnigent.spec.skill_sources import SkillSourceContext, resolve_harness_skil
 from omnigent.spec.types import AgentSpec, LocalToolInfo, SkillSpec
 from omnigent.terminals.ws_bridge import (
     WS_CLOSE_TERMINAL_NOT_FOUND,
+    bridge_conpty_to_websocket,
     bridge_tmux_pty_to_websocket,
 )
 from omnigent.tools.builtins.load_skill import (
@@ -275,6 +276,24 @@ def _publish_tmux_target_for_bridge(
     # Imported here to avoid pulling Claude-native specifics into the
     # generic runner module's import-time graph.
     from omnigent.claude_native_bridge import bridge_dir_for_bridge_id, write_tmux_target
+
+    if IS_WINDOWS:
+        # ConPTY backend: there is no tmux socket. Stand up (idempotently) the
+        # instance's loopback injection server and advertise its endpoint so the
+        # out-of-process executor can inject web-chat messages. The tmux fields
+        # stay as harmless placeholders for any generic reader.
+        from omnigent.inner.terminal_windows import ensure_injection_server
+
+        server = ensure_injection_server(instance)
+        write_tmux_target(
+            bridge_dir_for_bridge_id(bridge_id),
+            socket_path=instance.socket_path,
+            tmux_target=instance.tmux_target,
+            input_host=server.host,
+            input_port=server.port,
+            input_token=server.token,
+        )
+        return
 
     write_tmux_target(
         bridge_dir_for_bridge_id(bridge_id),
@@ -15943,6 +15962,19 @@ def create_runner_app(
                     reason="terminal resource not found or not running",
                 )
                 return
+        if IS_WINDOWS:
+            # ConPTY backend: there is no tmux socket to attach to and no
+            # tmux status pane to re-pop a cost-budget approval into, so the
+            # tmux cost-popup repop above is skipped. Attach via the instance's
+            # output fan-out instead. Client interactions are still stamped so
+            # the idle watcher discounts client-driven repaints.
+            await bridge_conpty_to_websocket(
+                websocket,
+                instance=entry.instance,
+                read_only=read_only,
+                on_client_interaction=entry.instance.note_client_interaction,
+            )
+            return
         # If a cost-budget approval is still pending when this client attaches
         # (the ASK fired while only the web Chat was open), re-pop it on the
         # now-attaching client. Spawned concurrently — it waits for the tmux

@@ -70,6 +70,10 @@ dependencies = [
     # path, so skip them there to avoid shipping an unusable dependency.
     "pexpect>=4.9,<5; platform_system != 'Windows'",
     "pyte>=0.8,<1; platform_system != 'Windows'",
+    # pywinpty backs the Windows ConPTY terminal stack (the additive fork's
+    # replacement for tmux on Windows; see omnigent/inner/terminal_windows.py).
+    # Windows-only — the POSIX path uses tmux and never imports it.
+    "pywinpty>=2.0,<3; platform_system == 'Windows'",
     "pydantic>=2.0,<3",
     "sqlalchemy>=2.0,<3",
     "tiktoken>=0.7,<1",

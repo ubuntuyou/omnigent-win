@@ -41,7 +41,10 @@ import time
 import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Final
+from typing import TYPE_CHECKING, Final
+
+if TYPE_CHECKING:
+    from omnigent.inner.terminal_windows import WindowsTerminalInstance
 
 # fcntl/pty/termios are POSIX-only. This module drives tmux PTY ``attach``
 # sessions, a feature that is disabled on Windows (see the terminal
@@ -657,5 +660,115 @@ async def bridge_tmux_pty_to_websocket(
                         code=WS_CLOSE_TERMINAL_NOT_FOUND,
                         reason="terminal session ended",
                     )
+            else:
+                await websocket.close()
+
+
+async def bridge_conpty_to_websocket(
+    websocket: WebSocket,
+    *,
+    instance: WindowsTerminalInstance,
+    read_only: bool,
+    on_client_interaction: Callable[[], None] | None = None,
+) -> None:
+    """
+    Bridge a Windows ConPTY-backed terminal instance to an accepted *websocket*.
+
+    The Windows analogue of :func:`bridge_tmux_pty_to_websocket`. There is no
+    tmux socket and no per-attach child: the instance OWNS the ConPTY and fans
+    its output out to subscriber queues, so this bridge subscribes for output
+    and writes client input back through the instance's serialized write queue.
+
+    Wire protocol is identical to the tmux bridge: server→client binary frames;
+    client→server JSON ``resize`` control frames (applied via
+    :meth:`WindowsTerminalInstance.resize`) and raw binary input (dropped when
+    ``read_only``).
+
+    Lifecycle: the instance is owned by the terminal registry, NOT by this
+    bridge. A client disconnect must NOT tear the instance down (closing a
+    browser tab cannot kill the agent). Only the subscription is released on
+    exit; the websocket is closed best-effort with ``4404`` when the bridge
+    ended because the ConPTY child exited.
+
+    :param websocket: An accepted FastAPI :class:`WebSocket`.
+    :param instance: The running :class:`WindowsTerminalInstance` to attach to.
+    :param read_only: When ``True``, inbound binary frames are dropped.
+    :param on_client_interaction: Optional callback stamped on every inbound
+        frame and on exit, so the idle watcher discounts client-driven repaints.
+    :returns: None.
+    """
+    last_client_input_at: float | None = None
+
+    def _current_ws_coalesce_limit() -> int:
+        return _coalesce_limit_after_input(last_client_input_at)
+
+    # Subscribe to the instance's output fan-out. The instance's reader thread
+    # feeds this queue (bytes chunks; ``None`` EOF sentinel on child exit), so
+    # no ``add_reader`` is needed (and ProactorEventLoop forbids it anyway).
+    out_chunks = instance.subscribe()
+
+    async def _ws_to_conpty() -> None:
+        nonlocal last_client_input_at
+        try:
+            while True:
+                msg = await websocket.receive()
+                if on_client_interaction is not None:
+                    on_client_interaction()
+                if msg.get("type") == "websocket.disconnect":
+                    return
+                text = msg.get("text")
+                data = msg.get("bytes")
+                if text is not None:
+                    try:
+                        ctl = json.loads(text)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    if isinstance(ctl, dict) and ctl.get("type") == "resize":
+                        try:
+                            cols = int(ctl["cols"])
+                            rows = int(ctl["rows"])
+                        except (KeyError, TypeError, ValueError):
+                            continue
+                        instance.resize(rows, cols)
+                elif data is not None and not read_only:
+                    last_client_input_at = _monotonic()
+                    await instance.send_raw(data)
+        except WebSocketDisconnect:
+            return
+
+    out_task = asyncio.create_task(
+        _forward_pty_to_ws(websocket, out_chunks, max_coalesce_bytes=_current_ws_coalesce_limit),
+        name="conpty-attach-out-to-ws",
+    )
+    ws_task = asyncio.create_task(_ws_to_conpty(), name="conpty-attach-ws-to-in")
+    out_ended_first = False
+    try:
+        done, pending = await asyncio.wait(
+            {out_task, ws_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        out_ended_first = out_task in done
+        for task in pending:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        for task in done:
+            exc = task.exception()
+            if exc is not None:
+                _logger.warning("conpty-attach: bridge task crashed: %r", exc)
+    finally:
+        if on_client_interaction is not None:
+            on_client_interaction()
+        instance.unsubscribe(out_chunks)
+        # Only the subscription is released — the instance keeps running so the
+        # agent survives a browser tab closing. The output task ends first only
+        # when the subscriber saw EOF; confirm the child actually exited (vs a
+        # transient send error) before signalling terminal-gone.
+        with contextlib.suppress(RuntimeError):
+            if out_ended_first and not await instance.is_alive():
+                await websocket.close(
+                    code=WS_CLOSE_TERMINAL_NOT_FOUND,
+                    reason="terminal session ended",
+                )
             else:
                 await websocket.close()
