@@ -244,6 +244,10 @@ class WindowsTerminalInstance:
         for key in self.env_unset:
             env.pop(key, None)
         env = strip_runner_auth_secrets(env)
+        # Force UTF-8 I/O for Python subprocesses (PEP 540). Without this,
+        # Windows defaults to the system code page (cp1252), causing em-dashes
+        # and other non-ASCII characters to be mangled in the chat view.
+        env.setdefault("PYTHONUTF8", "1")
 
         argv = _resolve_windows_argv(self.command, self.args)
         # ConPTY initial size is deliberately small (24x80); the first browser
