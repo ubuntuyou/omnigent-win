@@ -3199,6 +3199,42 @@ async def _post_clear_supersession(
         )
 
 
+def _json_safe(value: Any) -> Any:
+    """
+    Recursively replace lone surrogates so a payload can be UTF-8 encoded.
+
+    Claude's transcript and live-delta JSONL can carry a lone surrogate
+    (e.g. ``\\udc9d``, the ``surrogateescape`` image of a non-UTF-8 byte such
+    as cp1252 ``0x9d``): the file parses fine via ``json.loads``, but httpx's
+    ``json=`` encoder calls ``str.encode("utf-8")`` while building the request,
+    which raises ``UnicodeEncodeError`` on a lone surrogate. That exception is
+    not an ``httpx.HTTPError``, so it slips past the per-item POST guards and
+    crashes the whole forwarder poll; the deltas run first, so it also blocks
+    item/status forwarding behind it, and on a runner restart the lost
+    in-process delta-dedupe (``seen_delta_keys``) re-posts already-mirrored
+    chunks — the intermittent "turns doubled wholesale" symptom. Scrubbing the
+    outgoing payload keeps one stray byte from wedging the tail. Normal text
+    (em dashes, CJK, emoji) round-trips byte-for-byte; only un-encodable
+    surrogates are replaced.
+
+    :param value: Any JSON-serializable value (str / dict / list / scalar).
+    :returns: The same structure with un-encodable surrogates replaced.
+    """
+    if isinstance(value, str):
+        # Fast path: the overwhelming majority of strings have no surrogate
+        # and encode cleanly, so avoid allocating a replacement copy.
+        try:
+            value.encode("utf-8")
+            return value
+        except UnicodeEncodeError:
+            return value.encode("utf-8", "replace").decode("utf-8")
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 async def _post_external_conversation_item(
     client: httpx.AsyncClient,
     *,
@@ -3216,14 +3252,16 @@ async def _post_external_conversation_item(
     """
     resp = await client.post(
         f"/v1/sessions/{session_id}/events",
-        json={
-            "type": "external_conversation_item",
-            "data": {
-                "item_type": item.item_type,
-                "item_data": item.data,
-                "response_id": item.response_id,
-            },
-        },
+        json=_json_safe(
+            {
+                "type": "external_conversation_item",
+                "data": {
+                    "item_type": item.item_type,
+                    "item_data": item.data,
+                    "response_id": item.response_id,
+                },
+            }
+        ),
     )
     resp.raise_for_status()
 
@@ -3251,15 +3289,17 @@ async def _post_external_output_text_delta(
     """
     resp = await client.post(
         f"/v1/sessions/{session_id}/events",
-        json={
-            "type": "external_output_text_delta",
-            "data": {
-                "delta": delta.delta,
-                "message_id": delta.message_id,
-                "index": delta.index,
-                "final": delta.final,
-            },
-        },
+        json=_json_safe(
+            {
+                "type": "external_output_text_delta",
+                "data": {
+                    "delta": delta.delta,
+                    "message_id": delta.message_id,
+                    "index": delta.index,
+                    "final": delta.final,
+                },
+            }
+        ),
     )
     resp.raise_for_status()
 

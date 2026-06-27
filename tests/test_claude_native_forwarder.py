@@ -6371,3 +6371,58 @@ async def test_compaction_in_progress_does_not_persist(tmp_path: Path) -> None:
     assert request["body"]["data"]["status"] == "in_progress"
     # _persist_native_compaction_item must NOT be called for in_progress.
     persist_mock.assert_not_called()
+
+
+def test_json_safe_scrubs_lone_surrogates_but_preserves_normal_text() -> None:
+    """
+    ``_json_safe`` replaces un-encodable surrogates and leaves clean text intact.
+
+    A lone surrogate (e.g. ``\\udc9d`` — the ``surrogateescape`` image of a
+    non-UTF-8 byte like cp1252 ``0x9d``) round-trips through ``json.loads`` but
+    blows up ``str.encode("utf-8")``; this scrub is what keeps it from crashing
+    the forwarder's POST.
+    """
+    dirty = {"data": {"text": "bad\udc9d byte — em", "n": 3, "ok": True, "x": None}}
+    safe = forwarder._json_safe(dirty)
+    # The whole structure must now be UTF-8 encodable (what httpx does on POST).
+    json.dumps(safe).encode("utf-8")
+    assert "\udc9d" not in safe["data"]["text"]
+    # Normal Unicode is preserved byte-for-byte (em dash, CJK, emoji, scalars).
+    clean = {"text": "hello — world 你好 🚀", "n": 3, "ok": True, "x": None}
+    assert forwarder._json_safe(clean) == clean
+
+
+@pytest.mark.asyncio
+async def test_delta_post_with_lone_surrogate_does_not_crash() -> None:
+    """
+    A streamed delta carrying a lone surrogate posts cleanly instead of crashing.
+
+    Regression for the intermittent "turns doubled wholesale" bug on Windows:
+    Claude's live-delta JSONL could carry a lone surrogate, and httpx's ``json=``
+    encoder raised ``UnicodeEncodeError`` (not an ``httpx.HTTPError``) while
+    building the request — escaping the per-delta guard, crashing the forwarder
+    poll, and on a runner restart re-posting already-mirrored chunks.
+    """
+    received: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        received["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(202, json={})
+
+    delta = ClaudeMessageDelta(
+        message_id="msg-1",
+        index=0,
+        final=True,
+        delta="streamed\udc9d text — done",
+    )
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ap") as client:
+        # Without the scrub this raises UnicodeEncodeError during request build.
+        await forwarder._post_external_output_text_delta(
+            client, session_id="conv_x", delta=delta
+        )
+
+    assert received["body"]["type"] == "external_output_text_delta"
+    assert "\udc9d" not in received["body"]["data"]["delta"]
+    # The em dash (legitimate non-ASCII) survives the scrub.
+    assert "—" in received["body"]["data"]["delta"]
