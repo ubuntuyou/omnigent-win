@@ -185,6 +185,13 @@ class WindowsTerminalInstance:
         self._last_client_interaction_at = float("-inf")
         # Set once Claude's input box mounts (bracketed-paste enable seen).
         self._bracketed_paste_seen = False
+        # Set once the first injected message has completed its submit. The
+        # boot-hook race that drops a lone submit CR only affects that first
+        # message; afterwards the box is mounted and stable, so later messages
+        # skip the output-quiet readiness gate (which never opens while a prior
+        # turn is still streaming — the cause of injection timeouts on a
+        # mid-turn steer).
+        self._submitted_once = False
         # Loopback injection server for cross-process web-chat message injection
         # (stood up by the runner via ensure_injection_server). None until then.
         self._injection_server: _InjectionServer | None = None
@@ -388,17 +395,28 @@ class WindowsTerminalInstance:
         no-op.
         """
         await asyncio.sleep(_SUBMIT_SETTLE_S)  # let the paste commit to the draft
-        deadline = time.monotonic() + _SUBMIT_WINDOW_S
-        while time.monotonic() < deadline:
-            if not self.running:
+        try:
+            if self._submitted_once:
+                # Post-boot: the hook race that swallows a lone CR is over, so a
+                # single Enter submits reliably. Don't wait for an output-quiet
+                # lull — a steer sent while a prior turn is still streaming would
+                # never see one, stalling the whole inject until it times out.
+                self.inject_payload("\r")
                 return
-            if (time.monotonic() - self._last_output_at) < _SUBMIT_QUIET_S:
-                await asyncio.sleep(0.1)  # Claude is rendering; wait for a lull
-                continue
-            self.inject_payload("\r")
-            await asyncio.sleep(_SUBMIT_CONFIRM_S)
-            if (time.monotonic() - self._last_output_at) < _SUBMIT_QUIET_S:
-                return  # output still streaming after the CR -> the turn started
+            deadline = time.monotonic() + _SUBMIT_WINDOW_S
+            while time.monotonic() < deadline:
+                if not self.running:
+                    return
+                if (time.monotonic() - self._last_output_at) < _SUBMIT_QUIET_S:
+                    await asyncio.sleep(0.1)  # Claude is rendering; wait for a lull
+                    continue
+                self.inject_payload("\r")
+                await asyncio.sleep(_SUBMIT_CONFIRM_S)
+                if (time.monotonic() - self._last_output_at) < _SUBMIT_QUIET_S:
+                    return  # output still streaming after the CR -> the turn started
+        finally:
+            # The box is mounted by now; later messages take the fast path above.
+            self._submitted_once = True
 
     async def wait_until_ready(self, *, timeout_s: float = 30.0) -> bool:
         """Wait until Claude's input box has mounted AND stopped repainting.
@@ -431,6 +449,12 @@ class WindowsTerminalInstance:
             await asyncio.sleep(0.05)
         if paste_seen_at is None:
             return False
+        # Post-boot fast path: the splash-repaint drop only threatens the first
+        # message. Once one has submitted, the box is stable — skip the
+        # output-quiet gate so a steer sent mid-stream (output never quiet) isn't
+        # stalled until the deadline, which is what surfaced as an inject timeout.
+        if self._submitted_once:
+            return True
         # Phase 2: repaints settled (output quiet) and the boot storm has had
         # time to start (min elapsed since the enable).
         while time.monotonic() < deadline:

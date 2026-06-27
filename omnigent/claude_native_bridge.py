@@ -2363,6 +2363,13 @@ def write_tmux_target(
 
 
 _INJECT_ACK_MAX_BYTES = 65536
+# The injection server acks only AFTER it finishes the readiness-gated paste +
+# submit, which for a first message can take wait_until_ready(timeout_s) plus the
+# submit window (~12s). Wait this much longer than ``timeout_s`` for the ack so a
+# slow-but-successful injection returns OK instead of a spurious "timed out"
+# (the client socket timeout used to equal ``timeout_s``, below the server's
+# worst case, so a mid-turn send aborted before the server could ack).
+_INJECT_ACK_GRACE_S = 20.0
 
 
 def _wait_for_injection_info(bridge_dir: Path, *, timeout_s: float) -> dict[str, Any]:
@@ -2417,6 +2424,10 @@ def _inject_via_injection_server(
     frame = len(body).to_bytes(4, "big") + body
     try:
         with _socket.create_connection((info["host"], info["port"]), timeout=timeout_s) as sock:
+            # create_connection's timeout sticks to the socket and would also cap
+            # the wait for the ack. The server acks only after its paste+submit,
+            # so give the ack its own, longer budget than the connect.
+            sock.settimeout(timeout_s + _INJECT_ACK_GRACE_S)
             sock.sendall(frame)
             header = _recv_exactly(sock, 4)
             n = int.from_bytes(header, "big")
