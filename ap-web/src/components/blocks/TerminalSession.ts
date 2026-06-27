@@ -205,6 +205,18 @@ type TerminalCore = {
 };
 
 /**
+ * Structural view onto xterm's render service, used only to read the
+ * computed cell size for letterbox dot-tiling (see
+ * {@link TerminalSession.cellSize}). All optional — every access is guarded.
+ */
+// eslint-disable-next-line no-underscore-dangle
+type TerminalCellDims = {
+  _core?: {
+    _renderService?: { dimensions?: { css?: { cell?: { width: number; height: number } } } };
+  };
+};
+
+/**
  * Load the WebGL renderer onto *term*, returning the addon or ``null``
  * when WebGL is unavailable and the DOM renderer stays in use.
  *
@@ -288,6 +300,9 @@ export function applyTerminalCopy(
 export class TerminalSession {
   private readonly term: Terminal;
   private readonly fit: FitAddon;
+  /** The DOM node xterm is mounted under; its background paints the
+   * letterbox margin when the grid is pinned smaller than the container. */
+  private readonly container: HTMLElement;
   /** WebGL renderer addon, or ``null`` when WebGL is unavailable. */
   private readonly webgl: WebglAddon | null;
   private readonly ws: WebSocket;
@@ -298,6 +313,16 @@ export class TerminalSession {
   private lastUserInputAt = 0;
   /** Guards {@link dispose} so calling it twice is a safe no-op. */
   private disposed = false;
+  /**
+   * True once the server has pushed an authoritative (effective) grid size.
+   * The Windows ConPTY bridge sends a ``resize`` control frame carrying the
+   * smallest-wins size shared across all attached clients; from then on the
+   * server owns the grid dimensions, so a larger client renders the shared
+   * smaller grid (clean empty margin) instead of fitting its big container
+   * and showing stale cells outside the active region. The tmux bridge never
+   * sends these frames, so this stays false there and fit-to-container holds.
+   */
+  private serverPinnedSize = false;
 
   /**
    * Construct, attach to the DOM, and open the WebSocket.
@@ -351,6 +376,7 @@ export class TerminalSession {
       // Opt into xterm's proposed APIs, matching openui's terminal setup.
       allowProposedApi: true,
     });
+    this.container = container;
     this.fit = new FitAddon();
     this.term.loadAddon(this.fit);
     // Turn bare URLs in terminal output into clickable links. Without
@@ -421,9 +447,15 @@ export class TerminalSession {
             lastActivityTs = now;
             onActivity?.();
           }
+          return;
         }
-        // Server doesn't currently send text frames; ignore if it ever
-        // does so they aren't interpreted as terminal output.
+        // Text frames are JSON control messages. The Windows ConPTY bridge
+        // sends ``{type:"resize",cols,rows}`` to pin this client to the shared
+        // smallest-wins grid size (see handleControlFrame). Never written to
+        // the terminal as output.
+        if (typeof ev.data === "string") {
+          this.handleControlFrame(ev.data);
+        }
       },
       { signal },
     );
@@ -484,6 +516,72 @@ export class TerminalSession {
    */
   setTheme(isDark: boolean): void {
     this.term.options.theme = terminalTheme(isDark);
+    // Repaint the letterbox margin in the new theme's colors.
+    this.updateLetterbox();
+  }
+
+  /**
+   * Return xterm's rendered cell size in CSS px, or ``null`` if unknown.
+   *
+   * Prefers the renderer's own dimensions; falls back to measuring the
+   * mounted grid element. Used to tile the letterbox dot pattern so its
+   * dots line up with the (hidden) character grid.
+   */
+  private cellSize(): { width: number; height: number } | null {
+    try {
+      // eslint-disable-next-line no-underscore-dangle
+      const dims = (this.term as unknown as TerminalCellDims)._core?._renderService?.dimensions?.css
+        ?.cell;
+      if (dims && dims.width > 0 && dims.height > 0) {
+        return { width: dims.width, height: dims.height };
+      }
+    } catch {
+      /* fall through to measurement */
+    }
+    const el = this.term.element;
+    if (el && this.term.cols > 0 && this.term.rows > 0) {
+      const width = el.clientWidth / this.term.cols;
+      const height = el.clientHeight / this.term.rows;
+      if (width > 0 && height > 0) return { width, height };
+    }
+    return null;
+  }
+
+  /**
+   * Paint (or clear) the letterbox margin behind the grid.
+   *
+   * When the server has pinned this client to a shared smallest-wins grid
+   * smaller than its container, the leftover L-shaped margin would show
+   * stale pixels. Fill it with a dim per-cell dot pattern over the terminal
+   * background — the web analog of tmux filling the inactive region of a
+   * larger client with ``·``. The opaque ``.xterm`` element covers the
+   * active grid, so dots show only in the margin. No-op (and clears any
+   * prior fill) when the server hasn't pinned a size.
+   */
+  private updateLetterbox(): void {
+    const style = this.container.style;
+    if (!this.serverPinnedSize) {
+      style.backgroundColor = "";
+      style.backgroundImage = "";
+      return;
+    }
+    const theme = this.term.options.theme ?? {};
+    const bg = typeof theme.background === "string" ? theme.background : "#000000";
+    const fgRaw = typeof theme.foreground === "string" ? theme.foreground : "#808080";
+    // Dim the dots to ~33% so the inactive margin reads as secondary chrome,
+    // not content. 8-digit hex alpha only when the value is a 6-digit hex.
+    const dot = /^#[0-9a-f]{6}$/i.test(fgRaw) ? `${fgRaw}55` : fgRaw;
+    style.backgroundColor = bg;
+    const cell = this.cellSize();
+    if (cell === null) {
+      // Couldn't measure cells — at least keep the margin a clean bg block.
+      style.backgroundImage = "";
+      return;
+    }
+    style.backgroundImage = `radial-gradient(circle at center, ${dot} 1px, transparent 1.5px)`;
+    style.backgroundSize = `${cell.width}px ${cell.height}px`;
+    style.backgroundPosition = "0 0";
+    style.backgroundRepeat = "repeat";
   }
 
   /**
@@ -539,13 +637,70 @@ export class TerminalSession {
     this.term.write(bytes);
   }
 
-  private sendResize(): void {
-    if (this.ws.readyState !== WebSocket.OPEN) return;
+  /**
+   * Apply a server-pushed effective grid size (Windows ConPTY smallest-wins).
+   *
+   * Pins the xterm grid to the shared ``cols``×``rows`` and marks the server
+   * authoritative, so subsequent container changes report their size but no
+   * longer resize the grid locally — a larger client letterboxes the shared
+   * smaller grid instead of showing stale cells (the multi-client artifacts).
+   *
+   * :param text: Raw text frame; a JSON ``{type:"resize",cols,rows}`` message.
+   */
+  private handleControlFrame(text: string): void {
+    let msg: unknown;
     try {
-      this.fit.fit();
+      msg = JSON.parse(text);
     } catch {
       return;
     }
-    this.ws.send(JSON.stringify({ type: "resize", cols: this.term.cols, rows: this.term.rows }));
+    if (typeof msg !== "object" || msg === null) return;
+    const m = msg as { type?: unknown; cols?: unknown; rows?: unknown };
+    if (m.type !== "resize") return;
+    const cols = Number(m.cols);
+    const rows = Number(m.rows);
+    if (!Number.isInteger(cols) || !Number.isInteger(rows) || cols < 1 || rows < 1) return;
+    const firstPin = !this.serverPinnedSize;
+    this.serverPinnedSize = true;
+    if (this.term.cols === cols && this.term.rows === rows) {
+      // Already at the shared size, but if this is the first pin the
+      // letterbox margin still needs painting.
+      if (firstPin) this.updateLetterbox();
+      return;
+    }
+    try {
+      this.term.resize(cols, rows);
+    } catch {
+      /* noop */
+    }
+    this.updateLetterbox();
+  }
+
+  private sendResize(): void {
+    if (this.ws.readyState !== WebSocket.OPEN) return;
+    // Measure the container WITHOUT committing the grid to it: with several
+    // browsers on one ConPTY the server negotiates a shared smallest-wins size
+    // and pushes it back (handleControlFrame). We always REPORT our capacity so
+    // that negotiation sees our true size, but only render at it ourselves
+    // until the server pins an authoritative size. The tmux bridge never pins,
+    // so there fit-to-container always holds (proposeDimensions == old fit()).
+    //
+    // proposeDimensions() returns undefined before the container has a
+    // measurable layout (jsdom under test, or a detached node) — fall back to
+    // the terminal's current grid so an initial resize frame is still sent,
+    // matching the pre-pin behavior (fit() was a no-op there but term.cols/rows
+    // still carried the 80x24 default).
+    const dims = this.fit.proposeDimensions();
+    const cols = dims?.cols || this.term.cols;
+    const rows = dims?.rows || this.term.rows;
+    if (!cols || !rows) return;
+    if (!this.serverPinnedSize && (this.term.cols !== cols || this.term.rows !== rows)) {
+      try {
+        this.term.resize(cols, rows);
+      } catch {
+        return;
+      }
+    }
+    this.ws.send(JSON.stringify({ type: "resize", cols, rows }));
   }
 }
