@@ -370,10 +370,9 @@ class WindowsTerminalInstance:
         loop = self._loop
         if loop is None:
             return
-        try:
+        # Swallow "event loop is closed" during teardown.
+        with contextlib.suppress(RuntimeError):
             loop.call_soon_threadsafe(self._enqueue_write, payload)
-        except RuntimeError:
-            pass  # loop closed
 
     async def submit_injected(self) -> None:
         """Submit a just-pasted first message, riding out the boot-hook race.
@@ -517,7 +516,7 @@ class WindowsTerminalInstance:
                 data = pty.read(8192)
             except EOFError:
                 break
-            except Exception:
+            except Exception:  # noqa: BLE001 - any ConPTY read failure ends the loop
                 break
             if not data:
                 if not pty.isalive():
@@ -748,7 +747,7 @@ class _InjectionServer:
             await self._write_frame(writer, {"ok": ok, "error": error})
         except (asyncio.IncompleteReadError, ConnectionError, OSError):
             pass
-        except Exception:  # noqa: BLE001 - never let a client crash the server
+        except Exception:
             logger.exception("injection server handler failed")
         finally:
             with contextlib.suppress(Exception):

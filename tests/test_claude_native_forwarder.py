@@ -6418,9 +6418,7 @@ async def test_delta_post_with_lone_surrogate_does_not_crash() -> None:
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport, base_url="http://ap") as client:
         # Without the scrub this raises UnicodeEncodeError during request build.
-        await forwarder._post_external_output_text_delta(
-            client, session_id="conv_x", delta=delta
-        )
+        await forwarder._post_external_output_text_delta(client, session_id="conv_x", delta=delta)
 
     assert received["body"]["type"] == "external_output_text_delta"
     assert "\udc9d" not in received["body"]["data"]["delta"]
