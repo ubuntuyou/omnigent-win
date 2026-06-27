@@ -684,15 +684,23 @@ export class TerminalSession {
     // that negotiation sees our true size, but only render at it ourselves
     // until the server pins an authoritative size. The tmux bridge never pins,
     // so there fit-to-container always holds (proposeDimensions == old fit()).
+    //
+    // proposeDimensions() returns undefined before the container has a
+    // measurable layout (jsdom under test, or a detached node) — fall back to
+    // the terminal's current grid so an initial resize frame is still sent,
+    // matching the pre-pin behavior (fit() was a no-op there but term.cols/rows
+    // still carried the 80x24 default).
     const dims = this.fit.proposeDimensions();
-    if (!dims || !dims.cols || !dims.rows) return;
-    if (!this.serverPinnedSize && (this.term.cols !== dims.cols || this.term.rows !== dims.rows)) {
+    const cols = dims?.cols || this.term.cols;
+    const rows = dims?.rows || this.term.rows;
+    if (!cols || !rows) return;
+    if (!this.serverPinnedSize && (this.term.cols !== cols || this.term.rows !== rows)) {
       try {
-        this.term.resize(dims.cols, dims.rows);
+        this.term.resize(cols, rows);
       } catch {
         return;
       }
     }
-    this.ws.send(JSON.stringify({ type: "resize", cols: dims.cols, rows: dims.rows }));
+    this.ws.send(JSON.stringify({ type: "resize", cols, rows }));
   }
 }
