@@ -2349,7 +2349,7 @@ def _host_daemon_alive() -> bool:
 _LOCAL_SERVER_DISCOVER_TIMEOUT_S = 120.0
 
 
-def _ensure_databricks_server_auth(server: str) -> None:
+def _ensure_databricks_server_auth(server: str, *, non_interactive: bool = False) -> None:
     """Sign in (or fail with the login hint) for Databricks-fronted servers.
 
     Probes ``/v1/me`` with whatever credentials the auth chain can mint
@@ -2366,9 +2366,14 @@ def _ensure_databricks_server_auth(server: str) -> None:
 
     :param server: Remote server base URL without a trailing slash,
         e.g. ``"https://myapp-123.aws.databricksapps.com"``.
+    :param non_interactive: When ``True``, never run the browser login —
+        emit the same fail-loud hint a headless invocation gets, even on a
+        TTY. Lets callers (e.g. ``omnigent host --non-interactive``) keep
+        their scripted, no-prompt behavior.
     :raises click.ClickException: When the server is Databricks-fronted,
-        no credentials resolve, and stdin is not a TTY (or the login
-        flow itself fails).
+        no credentials resolve, and the login flow is suppressed (stdin is
+        not a TTY or ``non_interactive`` is set) — or the login flow itself
+        fails.
     """
     import httpx as _httpx
 
@@ -2390,7 +2395,7 @@ def _ensure_databricks_server_auth(server: str) -> None:
     if workspace_host is None:
         return
     login_cmd = f"omnigent login {server}"
-    if not sys.stdin.isatty():
+    if non_interactive or not sys.stdin.isatty():
         raise click.ClickException(
             f"Not signed in to {server} (Databricks-fronted; /v1/me answered "
             f"HTTP {probe.status_code}). Run `{login_cmd}` and retry."
@@ -6634,8 +6639,19 @@ def _prompt_stop_local_server() -> None:
 
 @cli.group("host", cls=_HostGroup, invoke_without_command=True)
 @click.option("--server", default=None, help="Remote omnigent server URL.")
+@click.option(
+    "--non-interactive",
+    "non_interactive",
+    is_flag=True,
+    default=False,
+    help=(
+        "Never prompt for sign-in. When the server requires auth and you "
+        "are not logged in, fail with the `omnigent login` hint instead of "
+        "launching the browser login flow. Use this in scripts and CI."
+    ),
+)
 @click.pass_context
-def host(ctx: click.Context, server: str | None) -> None:
+def host(ctx: click.Context, server: str | None, non_interactive: bool) -> None:
     """
     Register this machine as a host with a server.
 
@@ -6649,11 +6665,20 @@ def host(ctx: click.Context, server: str | None) -> None:
     <url>``) or via ``--server <url>``. A leading ``status``, ``stop``,
     or ``stop-session`` token still runs that management subcommand.
 
+    When the target server is Databricks-fronted and you are not signed
+    in, ``host`` runs the same flow ``omnigent login`` would before
+    connecting (an interactive browser flow). Pass ``--non-interactive``
+    to keep the old scripted behavior: fail with the login command to run
+    instead of prompting.
+
     :param ctx: Click invocation context. ``ctx.invoked_subcommand`` is
         set when a management subcommand such as ``"status"`` is running.
     :param server: Remote Omnigent server URL, e.g.
         ``"https://example.databricksapps.com"``. ``None`` falls back
         to config; empty string selects local mode.
+    :param non_interactive: When ``True``, never launch the browser login
+        for an un-authed remote server — fail with the ``omnigent login``
+        hint instead.
     """
     ctx.ensure_object(dict)
     ctx.obj["server"] = server
@@ -6664,6 +6689,10 @@ def host(ctx: click.Context, server: str | None) -> None:
         server = cfg.get("server")
     if server:
         server = _resolve_server_url(server)
+    # Remote mode is decided here, before the local-mode branch reassigns
+    # ``server`` to the spawned loopback URL — only a remote target needs
+    # the sign-in pre-flight.
+    remote_mode = bool(server)
 
     from omnigent.host.connect import run_host_process
 
@@ -6692,6 +6721,14 @@ def host(ctx: click.Context, server: str | None) -> None:
     # prompt over an error.
     stopped_cleanly = False
     try:
+        # Sign in first when the remote server is Databricks-fronted and we
+        # hold no usable credentials — otherwise the tunnel upgrade is
+        # redirected to a login page and the host dies with an opaque
+        # "redirected to a login page" error after several retries. On a TTY
+        # this runs the browser login and continues; ``--non-interactive``
+        # (or a headless invocation) fails loud with the command to run.
+        if remote_mode:
+            _ensure_databricks_server_auth(server, non_interactive=non_interactive)
         run_host_process(server_url=server)
         stopped_cleanly = True
     except KeyboardInterrupt:
@@ -11004,6 +11041,7 @@ def _run_configure_harnesses_interactive() -> None:
         # harness shows at once. Each row is (target, name, status, kind, hint),
         # where ``hint`` is the selection-only description (install command /
         # next step), empty for a ready harness.
+        from omnigent.onboarding.hermes_auth import hermes_config_summary
         from omnigent.onboarding.opencode_auth import opencode_auth_summary
 
         rows: list[tuple[str, str, str, str, str]] = []
@@ -11062,21 +11100,14 @@ def _run_configure_harnesses_interactive() -> None:
                 ),
             )
 
-        # Hermes — curl-installed, but provider/model config is opaque until
-        # `hermes model` has been run. Treat an installed binary as
-        # "not configured" rather than ready so setup does not overstate the
-        # state of a fresh install.
-        if harness_cli_installed(HERMES_KEY):
-            rows.append(
-                (
-                    _HERMES,
-                    "Hermes",
-                    "Not configured",
-                    "warn",
-                    "Open to configure with `hermes model`.",
-                ),
-            )
-        else:
+        # Hermes — curl-installed; its provider/model live in
+        # ``~/.hermes/config.yaml`` (written by `hermes model`). Read that so a
+        # configured Hermes shows the picked model as ready, instead of always
+        # reading "not configured" on an installed binary. A fresh install
+        # ships ``provider: auto`` (nothing picked), so it still reads
+        # "not configured" until `hermes model` selects a concrete provider.
+        hermes = hermes_config_summary()
+        if not hermes.installed:
             hermes_spec = harness_install_spec(HERMES_KEY)
             hermes_hint = (
                 hermes_spec.install_hint
@@ -11085,6 +11116,18 @@ def _run_configure_harnesses_interactive() -> None:
             )
             rows.append(
                 (_HERMES, "Hermes", "Not installed", "missing", _install_hint(hermes_hint)),
+            )
+        elif hermes.ready:
+            rows.append((_HERMES, "Hermes", hermes.describe(), "ready", ""))
+        else:
+            rows.append(
+                (
+                    _HERMES,
+                    "Hermes",
+                    "Not configured",
+                    "warn",
+                    "Open to configure with `hermes model`.",
+                ),
             )
 
         rows.append(_family_row(PI_SURFACE))
@@ -11670,7 +11713,11 @@ def _workspace_api_server_url(server: str) -> str:
 
     import httpx as _httpx
 
-    from omnigent.conversation_browser import WORKSPACE_API_PATH, WORKSPACE_UI_PATH
+    from omnigent.conversation_browser import (
+        WORKSPACE_API_PATH,
+        WORKSPACE_UI_PATH,
+        display_server_url,
+    )
 
     server = server.rstrip("/")
     parsed = urlsplit(server)
@@ -11714,7 +11761,9 @@ def _workspace_api_server_url(server: str) -> str:
     except _httpx.HTTPError:
         return server
     if _workspace_mount_probe_matches(candidate, api_probe):
-        click.echo(f"Using {candidate} (Databricks workspace-hosted omnigent).")
+        click.echo(
+            f"Using {display_server_url(candidate)} (Databricks workspace-hosted omnigent)."
+        )
         return candidate
     # The anonymous probe came back inconclusive (404 on Azure even
     # when the mount exists). Retry it with a cached workspace bearer;
@@ -11732,7 +11781,9 @@ def _workspace_api_server_url(server: str) -> str:
         except _httpx.HTTPError:
             authed_probe = None
         if authed_probe is not None and _workspace_mount_probe_matches(candidate, authed_probe):
-            click.echo(f"Using {candidate} (Databricks workspace-hosted omnigent).")
+            click.echo(
+                f"Using {display_server_url(candidate)} (Databricks workspace-hosted omnigent)."
+            )
             return candidate
         click.echo(
             f"Note: {server} answers like a Databricks workspace, but "
