@@ -34,6 +34,23 @@ from omnigent.native_policy_hook import (
     post_evaluate_with_retry,
 )
 
+
+def _read_stdin_utf8() -> str:
+    """
+    Read all of stdin decoded as UTF-8.
+
+    Claude Code delivers hook payloads as UTF-8 JSON, but on Windows
+    ``sys.stdin`` decodes with the locale code page (cp1252), which mangles
+    non-ASCII text (em-dash / arrow → mojibake) before it reaches the chat
+    view. Decoding the raw bytes as UTF-8 explicitly fixes every such field
+    at the source; ``errors="replace"`` guarantees a stray byte never crashes
+    the hook (it must never block Claude).
+
+    :returns: The full stdin contents as a UTF-8 string.
+    """
+    return sys.stdin.buffer.read().decode("utf-8", "replace")
+
+
 # Client-side budget for the permission-request long-poll to AP. Held
 # at one day so the hook subprocess waits ~indefinitely for a verdict
 # from the web UI (or for Claude to close the connection when the user
@@ -89,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
     if raw_argv and raw_argv[0] == "pre-tool-use":
         return _main_evaluate_policy(raw_argv[1:])
     args = _parse_args(raw_argv)
-    raw = sys.stdin.read()
+    raw = _read_stdin_utf8()
     try:
         payload = json.loads(raw or "{}")
     except json.JSONDecodeError as exc:
@@ -592,7 +609,7 @@ def _main_permission_request(argv: list[str]) -> int:
         Claude Code falls back to its terminal prompt.
     """
     args = _parse_permission_args(argv)
-    raw = sys.stdin.read()
+    raw = _read_stdin_utf8()
     try:
         payload = json.loads(raw or "{}")
     except json.JSONDecodeError as exc:
@@ -652,7 +669,7 @@ def _main_ask_user_question(argv: list[str]) -> int:
         falls back to its terminal TUI prompt rather than blocking.
     """
     args = _parse_permission_args(argv)
-    raw = sys.stdin.read()
+    raw = _read_stdin_utf8()
     try:
         payload = json.loads(raw or "{}")
     except json.JSONDecodeError as exc:
@@ -774,7 +791,7 @@ def _main_evaluate_policy(argv: list[str]) -> int:
         are expressed via the JSON output, not exit codes.
     """
     args = _parse_evaluate_policy_args(argv)
-    raw = sys.stdin.read()
+    raw = _read_stdin_utf8()
     try:
         payload = json.loads(raw or "{}")
     except json.JSONDecodeError as exc:

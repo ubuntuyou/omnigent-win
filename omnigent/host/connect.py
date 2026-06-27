@@ -9,6 +9,7 @@ the server.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import subprocess
@@ -1561,10 +1562,8 @@ def run_host_process(
     # the host stuck "offline". Force UTF-8 so console output can never crash
     # the host process. No-op on POSIX, where stdout is already UTF-8.
     for _stream in (sys.stdout, sys.stderr):
-        try:
+        with contextlib.suppress(AttributeError, ValueError):
             _stream.reconfigure(encoding="utf-8", errors="replace")
-        except (AttributeError, ValueError):
-            pass
 
     from omnigent.host.identity import CONFIG_PATH
 

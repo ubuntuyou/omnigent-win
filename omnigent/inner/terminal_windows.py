@@ -244,6 +244,10 @@ class WindowsTerminalInstance:
         for key in self.env_unset:
             env.pop(key, None)
         env = strip_runner_auth_secrets(env)
+        # Force UTF-8 I/O for Python subprocesses (PEP 540). Without this,
+        # Windows defaults to the system code page (cp1252), causing em-dashes
+        # and other non-ASCII characters to be mangled in the chat view.
+        env.setdefault("PYTHONUTF8", "1")
 
         argv = _resolve_windows_argv(self.command, self.args)
         # ConPTY initial size is deliberately small (24x80); the first browser
@@ -366,10 +370,9 @@ class WindowsTerminalInstance:
         loop = self._loop
         if loop is None:
             return
-        try:
+        # Swallow "event loop is closed" during teardown.
+        with contextlib.suppress(RuntimeError):
             loop.call_soon_threadsafe(self._enqueue_write, payload)
-        except RuntimeError:
-            pass  # loop closed
 
     async def submit_injected(self) -> None:
         """Submit a just-pasted first message, riding out the boot-hook race.
@@ -513,7 +516,7 @@ class WindowsTerminalInstance:
                 data = pty.read(8192)
             except EOFError:
                 break
-            except Exception:
+            except Exception:  # noqa: BLE001 - any ConPTY read failure ends the loop
                 break
             if not data:
                 if not pty.isalive():
@@ -744,7 +747,7 @@ class _InjectionServer:
             await self._write_frame(writer, {"ok": ok, "error": error})
         except (asyncio.IncompleteReadError, ConnectionError, OSError):
             pass
-        except Exception:  # noqa: BLE001 - never let a client crash the server
+        except Exception:
             logger.exception("injection server handler failed")
         finally:
             with contextlib.suppress(Exception):

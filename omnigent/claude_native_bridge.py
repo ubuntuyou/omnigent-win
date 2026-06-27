@@ -36,6 +36,7 @@ import queue
 import re
 import secrets
 import shlex
+import socket as _socket
 import stat
 import sys
 import tempfile
@@ -50,8 +51,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib import error, request
-
-import socket as _socket
 
 from omnigent._platform import IS_WINDOWS, stable_user_id
 from omnigent.claude_native_message_display_hook import MESSAGE_DELTAS_FILE
@@ -2390,7 +2389,7 @@ def _wait_for_injection_info(bridge_dir: Path, *, timeout_s: float) -> dict[str,
     )
 
 
-def _recv_exactly(sock: "_socket.socket", n: int) -> bytes:
+def _recv_exactly(sock: _socket.socket, n: int) -> bytes:
     buf = bytearray()
     while len(buf) < n:
         chunk = sock.recv(n - len(buf))
@@ -2417,9 +2416,7 @@ def _inject_via_injection_server(
     body = json.dumps(req).encode("utf-8")
     frame = len(body).to_bytes(4, "big") + body
     try:
-        with _socket.create_connection(
-            (info["host"], info["port"]), timeout=timeout_s
-        ) as sock:
+        with _socket.create_connection((info["host"], info["port"]), timeout=timeout_s) as sock:
             sock.sendall(frame)
             header = _recv_exactly(sock, 4)
             n = int.from_bytes(header, "big")

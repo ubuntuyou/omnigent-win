@@ -63,7 +63,11 @@ def main(argv: list[str] | None = None) -> int:
     """
     raw_argv = sys.argv[1:] if argv is None else argv
     args = _parse_args(raw_argv)
-    raw = sys.stdin.read()
+    # Decode stdin as UTF-8 explicitly. On Windows sys.stdin uses the locale
+    # code page (cp1252), which mangles Claude's UTF-8 delta text (em-dash and
+    # arrow render as "â€"" / "â†'") in the live chat preview. errors="replace"
+    # keeps a stray byte from ever crashing the hook (it must never block Claude).
+    raw = sys.stdin.buffer.read().decode("utf-8", "replace")
     try:
         payload = json.loads(raw or "{}")
     except json.JSONDecodeError as exc:

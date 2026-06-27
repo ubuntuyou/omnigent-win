@@ -31,7 +31,11 @@ def main(argv: list[str] | None = None) -> int:
         statusLine must never crash Claude Code's TUI loop).
     """
     args = _parse_args(sys.argv[1:] if argv is None else argv)
-    raw = sys.stdin.read()
+    # Decode stdin as UTF-8 explicitly: on Windows sys.stdin uses the locale
+    # code page (cp1252), which would mangle non-ASCII statusLine data. The raw
+    # string is also chained to the user's statusLine command below, so a clean
+    # UTF-8 decode keeps that output correct too.
+    raw = sys.stdin.buffer.read().decode("utf-8", "replace")
     payload: dict[str, object] | None = None
     try:
         parsed = json.loads(raw) if raw.strip() else None
