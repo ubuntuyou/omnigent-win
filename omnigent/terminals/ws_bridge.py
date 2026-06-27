@@ -680,9 +680,12 @@ async def bridge_conpty_to_websocket(
     and writes client input back through the instance's serialized write queue.
 
     Wire protocol is identical to the tmux bridge: server→client binary frames;
-    client→server JSON ``resize`` control frames (applied via
-    :meth:`WindowsTerminalInstance.resize`) and raw binary input (dropped when
-    ``read_only``).
+    client→server JSON ``resize`` control frames and raw binary input (dropped
+    when ``read_only``). On subscribe the instance replays its output tail so a
+    reconnect — or a second browser on the same session — renders immediately.
+    Resize frames go through :meth:`WindowsTerminalInstance.set_client_size`, so
+    several attached browsers share one pane at the smallest requested size
+    (tmux-style); this client's constraint is lifted on unsubscribe.
 
     Lifecycle: the instance is owned by the terminal registry, NOT by this
     bridge. A client disconnect must NOT tear the instance down (closing a
@@ -706,6 +709,24 @@ async def bridge_conpty_to_websocket(
     # feeds this queue (bytes chunks; ``None`` EOF sentinel on child exit), so
     # no ``add_reader`` is needed (and ProactorEventLoop forbids it anyway).
     out_chunks = instance.subscribe()
+    # Control channel for effective (smallest-wins) size updates. The instance
+    # pushes the shared size here whenever it changes (or seeds it on a late
+    # join); we forward each as a ``resize`` control frame so this client pins
+    # its grid to the shared size instead of showing stale cells outside the
+    # smaller active region (the multi-client artifacts).
+    size_chan = instance.size_channel(out_chunks)
+
+    async def _forward_size_to_ws() -> None:
+        if size_chan is None:
+            return
+        try:
+            while True:
+                rows, cols = await size_chan.get()
+                await websocket.send_text(
+                    json.dumps({"type": "resize", "cols": cols, "rows": rows})
+                )
+        except WebSocketDisconnect:
+            return
 
     async def _ws_to_conpty() -> None:
         nonlocal last_client_input_at
@@ -729,7 +750,7 @@ async def bridge_conpty_to_websocket(
                             rows = int(ctl["rows"])
                         except (KeyError, TypeError, ValueError):
                             continue
-                        instance.resize(rows, cols)
+                        instance.set_client_size(out_chunks, rows, cols)
                 elif data is not None and not read_only:
                     last_client_input_at = _monotonic()
                     await instance.send_raw(data)
@@ -741,10 +762,11 @@ async def bridge_conpty_to_websocket(
         name="conpty-attach-out-to-ws",
     )
     ws_task = asyncio.create_task(_ws_to_conpty(), name="conpty-attach-ws-to-in")
+    size_task = asyncio.create_task(_forward_size_to_ws(), name="conpty-attach-size-to-ws")
     out_ended_first = False
     try:
         done, pending = await asyncio.wait(
-            {out_task, ws_task},
+            {out_task, ws_task, size_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
         out_ended_first = out_task in done

@@ -176,9 +176,24 @@ class WindowsTerminalInstance:
         self._write_queue: asyncio.Queue[str | None] | None = None
         self._writer_task: asyncio.Task[None] | None = None
 
-        # Output fan-out. Subscriber queues are created/consumed on the event
-        # loop; the set is mutated only on the loop, so no lock is needed.
-        self._subscribers: set[asyncio.Queue[bytes | None]] = set()
+        # Output fan-out. Maps each subscriber queue to the terminal size that
+        # client last requested (``None`` until its first resize). Created and
+        # consumed on the event loop; mutated only on the loop, so no lock is
+        # needed. The size map drives smallest-wins sizing (see
+        # ``_apply_effective_size``); the keys are the broadcast fan-out set.
+        self._subscribers: dict[asyncio.Queue[bytes | None], tuple[int, int] | None] = {}
+        # Current ConPTY dimensions (rows, cols). Seeded to the launch size so a
+        # detach that lifts the last size constraint can restore it.
+        self._effective_size: tuple[int, int] = (24, 80)
+        # Per-subscriber control channel carrying effective (rows, cols) updates.
+        # A ConPTY has ONE size, so with several clients it renders at the
+        # smallest (see ``_apply_effective_size``); each client must then pin its
+        # xterm grid to that shared size. A larger client left at its own size
+        # shows stale cells outside the smaller active region — the multi-client
+        # "artifacts". tmux solves this by drawing every client at the shared
+        # size (padding the rest with dots); we push the size so the web client
+        # letterboxes the same way.
+        self._size_queues: dict[asyncio.Queue[bytes | None], asyncio.Queue[tuple[int, int]]] = {}
 
         self._output_tail = ""
         self._last_output_at = time.monotonic()
@@ -257,8 +272,10 @@ class WindowsTerminalInstance:
         env.setdefault("PYTHONUTF8", "1")
 
         argv = _resolve_windows_argv(self.command, self.args)
-        # ConPTY initial size is deliberately small (24x80); the first browser
-        # attach GROWS it losslessly (a shrink would rewrap and garble).
+        # ConPTY initial size is deliberately small (24x80) — matching
+        # _effective_size — so the first browser attach GROWS it losslessly (a
+        # shrink would rewrap and garble). With several clients the size is the
+        # smallest each requests (set_client_size / smallest-wins).
         self._pty = await asyncio.to_thread(
             PtyProcess.spawn,
             argv,
@@ -497,12 +514,75 @@ class WindowsTerminalInstance:
                 q.task_done()
 
     def resize(self, rows: int, cols: int) -> None:
-        """Resize the ConPTY (called from the WS bridge on a resize message)."""
+        """Force the ConPTY to an exact size, ignoring per-client constraints.
+
+        Escape hatch for callers that want a hard size (none today). The WS
+        bridge instead uses :meth:`set_client_size` so multiple attached
+        browsers negotiate a shared size (smallest-wins). A later
+        :meth:`set_client_size`/:meth:`unsubscribe` recomputes and overrides
+        whatever this set.
+        """
+        self._set_pty_size(rows, cols)
+
+    def set_client_size(self, q: asyncio.Queue[bytes | None], rows: int, cols: int) -> None:
+        """Record one client's requested size and re-apply smallest-wins.
+
+        A ConPTY has a single dimension, but several browsers can attach to the
+        same session at once. Mirroring tmux's shared-session default, the
+        effective size is the smallest rows/cols across all attached clients, so
+        no client's viewport overflows the pane. Call on the event loop.
+        """
+        if q not in self._subscribers:
+            return  # unsubscribed concurrently; ignore a late resize
+        self._subscribers[q] = (rows, cols)
+        self._apply_effective_size()
+
+    def _apply_effective_size(self) -> None:
+        """Resize the ConPTY to the min rows/cols across all sized clients.
+
+        Clients that have not reported a size yet (``None``) do not constrain
+        the result. When the last sized client detaches there is nothing to
+        apply, so the pane keeps its current size until the next client sizes
+        it. A no-op when the computed size already matches.
+        """
+        sizes = [s for s in self._subscribers.values() if s is not None]
+        if not sizes:
+            return
+        rows = min(r for r, _ in sizes)
+        cols = min(c for _, c in sizes)
+        if (rows, cols) == self._effective_size:
+            return
+        self._set_pty_size(rows, cols)
+
+    def _set_pty_size(self, rows: int, cols: int) -> None:
+        """Apply a size to the ConPTY and remember it. Call on the event loop.
+
+        Broadcasts the new size to every attached client so each pins its grid
+        to the shared dimensions (see :meth:`_broadcast_effective_size`)."""
+        self._effective_size = (rows, cols)
+        self._broadcast_effective_size()
         pty = self._pty
         if pty is None:
             return
         with contextlib.suppress(Exception):
             pty.setwinsize(rows, cols)
+
+    def _broadcast_effective_size(self) -> None:
+        """Push the current effective (rows, cols) to every client's size channel.
+
+        Each attached bridge forwards it as a ``resize`` control frame so the
+        client renders at the shared smallest-wins size. Drop-oldest on a full
+        queue (like :meth:`_broadcast`) so a wedged client never blocks others;
+        only the latest size matters, so a dropped intermediate is harmless.
+        """
+        for size_q in self._size_queues.values():
+            try:
+                size_q.put_nowait(self._effective_size)
+            except asyncio.QueueFull:
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    size_q.get_nowait()
+                with contextlib.suppress(asyncio.QueueFull):
+                    size_q.put_nowait(self._effective_size)
 
     # -- contract: output ----------------------------------------------------
 
@@ -520,16 +600,60 @@ class WindowsTerminalInstance:
             "scrollback_lines": scrollback,
         }
 
-    def subscribe(self) -> asyncio.Queue[bytes | None]:
+    def subscribe(self, *, replay: bool = True) -> asyncio.Queue[bytes | None]:
         """Register a WS subscriber. Returns a queue of output byte-chunks
-        (and a final ``None`` sentinel on process exit). Call on the loop."""
+        (and a final ``None`` sentinel on process exit). Call on the loop.
+
+        When ``replay`` is set (the default), the queue is primed with a
+        snapshot of the accumulated output tail BEFORE it joins the fan-out, so
+        a reconnecting client — or a second browser opening the same session —
+        immediately renders the current screen instead of a blank pane that
+        only fills on the next output. This snapshot-then-register order is
+        atomic: ``subscribe`` and ``_on_output`` both run on the event loop and
+        there is no ``await`` between snapshotting the tail and registering, so
+        no chunk can slip in between (no gap, no duplicate). The replay is the
+        best-effort raw stream (same basis as :meth:`read`), not a re-rendered
+        screen — xterm.js replays the ANSI and Claude's frequent repaints
+        reconcile any sequence clipped by the tail bound.
+        """
         q: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_MAXSIZE)
-        self._subscribers.add(q)
+        if replay and self._output_tail:
+            with contextlib.suppress(asyncio.QueueFull):
+                q.put_nowait(self._output_tail.encode("utf-8", "replace"))
+        # Seed a late joiner with the current shared size so it pins immediately
+        # — but only when another sized client already constrains the pane.
+        # A solo first client just renders at its own fit (its first resize sets
+        # the size), so seeding it would force a needless reflow to the launch
+        # default first.
+        size_q: asyncio.Queue[tuple[int, int]] = asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_MAXSIZE)
+        if any(s is not None for s in self._subscribers.values()):
+            with contextlib.suppress(asyncio.QueueFull):
+                size_q.put_nowait(self._effective_size)
+        self._size_queues[q] = size_q
+        self._subscribers[q] = None
         return q
 
+    def size_channel(
+        self, q: asyncio.Queue[bytes | None]
+    ) -> asyncio.Queue[tuple[int, int]] | None:
+        """Return the effective-size control queue for a subscribed output queue.
+
+        The WS bridge drains this and forwards each ``(rows, cols)`` to its
+        client as a ``resize`` control frame. ``None`` if ``q`` is not (or no
+        longer) subscribed.
+        """
+        return self._size_queues.get(q)
+
     def unsubscribe(self, q: asyncio.Queue[bytes | None]) -> None:
-        """Deregister a WS subscriber."""
-        self._subscribers.discard(q)
+        """Deregister a WS subscriber and lift its size constraint.
+
+        Recomputing after removal lets the pane grow back when the client that
+        was holding it small detaches (smallest-wins, see
+        :meth:`set_client_size`)."""
+        self._size_queues.pop(q, None)
+        had_size = self._subscribers.pop(q, None) is not None
+        if had_size:
+            self._apply_effective_size()
 
     def _reader_loop(self) -> None:
         """Daemon thread: read ConPTY output, hand chunks to the loop."""
