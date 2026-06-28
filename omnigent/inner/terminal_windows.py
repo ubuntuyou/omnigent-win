@@ -40,14 +40,20 @@ import socket
 import threading
 import time
 from pathlib import Path
-from typing import Any
-
-from winpty import PtyProcess
+from typing import TYPE_CHECKING, Any
 
 from omnigent.runner.identity import strip_runner_auth_secrets
 
 from . import _proc
 from .terminal import TerminalResult, _strip_ansi
+
+if TYPE_CHECKING:
+    # pywinpty is a Windows-only dependency (see pyproject's platform marker).
+    # Import it lazily — at module top it would make this module unimportable on
+    # Linux/macOS, where the platform-agnostic logic here (smallest-wins sizing,
+    # replay, literal slash-command injection) is unit-tested. The only runtime
+    # use is ``PtyProcess.spawn`` in ``launch``, which imports it there.
+    from winpty import PtyProcess
 
 logger = logging.getLogger(__name__)
 
@@ -273,6 +279,10 @@ class WindowsTerminalInstance:
         # Windows defaults to the system code page (cp1252), causing em-dashes
         # and other non-ASCII characters to be mangled in the chat view.
         env.setdefault("PYTHONUTF8", "1")
+
+        # Deferred import: pywinpty is Windows-only, so importing it at module
+        # load would break import on other platforms (see the TYPE_CHECKING note).
+        from winpty import PtyProcess
 
         argv = _resolve_windows_argv(self.command, self.args)
         # ConPTY initial size is deliberately small (24x80) — matching
