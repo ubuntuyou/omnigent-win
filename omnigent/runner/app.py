@@ -184,6 +184,12 @@ _SUBAGENT_DELIVERY_UNTRACKED = "untracked"
 _SUBAGENT_DELIVERY_MISSING_WORK_ENTRY = "missing_work_entry"
 _SUBAGENT_DELIVERY_MISSING_PARENT_INBOX = "missing_parent_inbox"
 _NATIVE_TERMINAL_START_FAILED_CODE = "native_terminal_start_failed"
+# Native harnesses ported to the Windows ConPTY backend (lower-cased
+# ``runtime_name`` as passed to ``_native_terminal_start_error_payload``). For
+# these a start failure on Windows is a real error, not a platform limitation,
+# so the client gets the "see runner logs" message instead of the misleading
+# "not supported on Windows". The remaining tmux-only harnesses keep the latter.
+_WINDOWS_NATIVE_TERMINAL_HARNESSES = frozenset({"claude", "codex", "pi", "opencode"})
 # Read budget for runner→server POSTs that can PARK behind a human-approval
 # ASK gate: policy evaluation (``_evaluate_policy_via_omnigent``) and sub-agent
 # wake-notice delivery (``_deliver_subagent_wake_post``). Both are gated at the
@@ -4882,15 +4888,20 @@ def _native_terminal_start_error_payload(exc: BaseException, runtime_name: str) 
         the raw cause is logged for operators, not surfaced to the caller.
     """
     _logger.warning("Native %s terminal start failed: %s", runtime_name, exc, exc_info=True)
-    if IS_WINDOWS:
-        # Native terminals are tmux/PTY-based and disabled on Windows by design.
-        # Give the client an actionable message instead of "see runner logs".
+    if IS_WINDOWS and runtime_name.lower() not in _WINDOWS_NATIVE_TERMINAL_HARNESSES:
+        # The remaining native harnesses are tmux/PTY-based and not yet ported to
+        # the ConPTY backend, so on Windows they genuinely can't start. Give the
+        # client an actionable message instead of "see runner logs".
         message = (
             f"Native {runtime_name} terminal (tmux/PTY) is not supported on "
             "Windows. Use an SDK-based harness (e.g. claude-sdk, cursor, "
             "copilot, or codex) for this agent, or run it on Linux/macOS."
         )
     else:
+        # POSIX, OR a harness already ported to the Windows ConPTY backend
+        # (claude / codex / pi / opencode): the ConPTY terminal itself is fine,
+        # so a failure here is a real start error — point the operator at the
+        # runner log rather than the misleading "not supported on Windows".
         message = f"Native {runtime_name} terminal failed to start; see runner logs for details."
     return {"code": _NATIVE_TERMINAL_START_FAILED_CODE, "message": message}
 

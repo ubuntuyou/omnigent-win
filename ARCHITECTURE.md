@@ -170,6 +170,45 @@ Two Windows-specific facts shape the fork's behavior:
   (This was originally misdiagnosed as an unfixable upstream limitation — every "broken"
   repro had run under a sandbox `TEMP=C:\WINDOWS\temp`.)
 
+## 4.9 Codex native on Windows (via an OpenAI-compatible provider)
+
+The codex-native harness is a **server transport** like opencode, not a TUI mirror:
+the runner spawns `codex app-server --listen ws://127.0.0.1:<port>` (JSON-RPC over a
+loopback WebSocket), drives turns over that socket, and rides a ConPTY for the terminal
+view. The defining Windows wrinkle is **auth**: Codex normally expects an OpenAI login,
+which the user doesn't have, so on Windows it routes through an omnigent **`key` provider**
+(Ollama Cloud) configured in `~/.omnigent/config.yaml`. Five facts shape the fork, all
+additive and `IS_WINDOWS`-guarded; the POSIX OpenAI-login path is untouched.
+
+- **Wire API.** codex ≥0.137 only speaks the **Responses** API (it hard-fails on
+  `wire_api="chat"`). Ollama Cloud implements `/v1/responses`, so the provider block sets
+  `wire_api: responses` — verified compatible, not assumed.
+
+- **Auth (the core additive change).** The POSIX provider override authenticates with
+  `auth={command="sh",args=["-c","printf …"]}` — but there is no `sh`/`printf` on a
+  Windows codex child. `_provider_codex_config_overrides` (`omnigent/inner/codex_executor.py`)
+  takes a `bearer_token` and, on Windows with a static key, emits an inline
+  `http_headers={Authorization="Bearer …"}` instead. `_codex_provider_launch`
+  (`omnigent/codex_native_app_server.py`) threads the configured key through as that bearer.
+
+- **Env.** `_clean_codex_env` adds `WINDOWS_ENV_PASSTHROUGH` (notably `SystemRoot`) to the
+  app-server child's allowlist, or it fast-fails with `0xC0000409` — the same Bun/Windows
+  startup trap as opencode (§4.8).
+
+- **Readiness gate.** `_codex_auth_unavailable_reason` (`omnigent/codex_native.py`) used to
+  gate solely on `auth.json`. On Windows it now also accepts a configured routable provider
+  (`_codex_configured_provider_routes`), so the harness picker unblocks with no OpenAI login.
+
+- **Spawning the real exe, not the shim.** `shutil.which("codex")` returns `codex.CMD`, a
+  batch shim that relaunches node with `%*`, re-parsing argv through `cmd.exe` and mangling
+  the `-c` provider/MCP overrides (embedded quotes + spaces get split → `unexpected argument`
+  → masked as "not supported on Windows"). `_find_codex_cli` resolves the vendored
+  `…/@openai/codex-win32-*/**/codex.exe` and spawns it directly, bypassing the re-parse.
+
+The CLI is **pinned to `0.139.0`**: codex 0.142 removed `app-server --listen` (stdio-only),
+which would break the loopback-WebSocket transport. Custom provider IDs can't be named
+`ollama` (reserved built-in = local Ollama); omnigent uses `omnigent_provider`.
+
 ## 5. Alignment with upstream — merge surface
 
 The fork stays mergeable with upstream because almost everything is additive:
@@ -186,9 +225,10 @@ The fork stays mergeable with upstream because almost everything is additive:
 
 ## 6. Known limitations (Windows path)
 
-- **Claude Code + OpenCode (both full TUI).** Both native paths have chat **and** terminal
-  views on Windows (opencode needs the `%TEMP%` fix in §4.8). Other native harnesses
-  (Codex, Cursor, Goose, Qwen) still require tmux and are untested on Windows.
+- **Working native harnesses: Claude Code, OpenCode, Pi, Codex.** All four have chat
+  **and** terminal views on Windows (opencode needs the `%TEMP%` fix in §4.8; codex needs
+  the provider/auth/exe wiring in §4.9). The remaining native harnesses (Cursor, Goose,
+  Qwen, Kimi, Hermes, Kiro, Antigravity) still require tmux and are untested on Windows.
 - The browser **Files** panel and terminal-list resource endpoints return `502` on
   Windows (resource proxy not wired up there yet); chat and terminal views are
   unaffected.

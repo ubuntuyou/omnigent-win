@@ -1,6 +1,13 @@
 %% omnigent-win — Windows ConPTY architecture for the claude-native harness.
 %% Additive, IS_WINDOWS-guarded; the POSIX/tmux path is upstream-unchanged.
 %% See ARCHITECTURE.md for the prose walkthrough.
+%%
+%% The graph below is the claude-native canonical flow. The other working
+%% Windows harnesses share the TERMINAL-VIEW half (ConPTY → ws_bridge) but feed
+%% the CHAT VIEW via a SERVER TRANSPORT instead of the transcript forwarder:
+%%   - opencode: `opencode serve` REST + SSE          (ARCHITECTURE.md §4.8)
+%%   - codex:    `codex app-server --listen ws://…`   (ARCHITECTURE.md §4.9)
+%% See the "altchat" note in the diagram.
 
 flowchart TB
     subgraph browser["Browser (web UI)"]
@@ -56,7 +63,13 @@ flowchart TB
     inj --> writeq
     writeq -->|literal keystrokes| claude
 
+    %% alternate chat-view transport for server-based harnesses (opencode / codex)
+    altchat["opencode serve (REST+SSE) /<br/>codex app-server (ws JSON-RPC)<br/>replaces the transcript forwarder<br/>for the CHAT VIEW · §4.8/§4.9"]
+    altchat -.->|external_conversation_item| persist
+
     classDef winfork fill:#cfe8ff,stroke:#3b82f6,color:#0b2942;
     classDef child fill:#fde9c8,stroke:#d97706,color:#3a2606;
+    classDef altnote fill:#e7e0ff,stroke:#7c3aed,color:#2a1a4a,stroke-dasharray:4 3;
     class inst,reader,writeq,inj,size,fwd,wsbridge,term winfork;
     class claude,jsonl,hooks child;
+    class altchat altnote;
