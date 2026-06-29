@@ -24,6 +24,7 @@ import httpx
 import yaml
 
 from omnigent._native_resume_hint import echo_native_resume_hint
+from omnigent._platform import IS_WINDOWS
 from omnigent._runner_startup import RunnerStartupProgress, runner_startup_progress
 from omnigent._wrapper_labels import (
     CODEX_NATIVE_WRAPPER_VALUE as _WRAPPER_LABEL_VALUE,
@@ -183,6 +184,38 @@ def _codex_auth_json_has_available_credential(auth_path: Path) -> bool:
     return False
 
 
+def _codex_configured_provider_routes() -> bool:
+    """Return whether an ``omnigent setup`` provider can route native Codex.
+
+    Codex's built-in ``openai`` provider authenticates from ``auth.json``, but a
+    machine can instead route Codex through a configured key/gateway/local
+    provider (e.g. Ollama Cloud serving the ``openai`` surface) that carries its
+    own credential — no ``auth.json`` involved. This asks the real routing layer
+    whether the default Codex provider yields a routable launch, reusing
+    :func:`_codex_provider_launch` so the routability rule is not duplicated.
+
+    :returns: ``True`` when a non-subscription provider is the configured Codex
+        default and can route on its own; ``False`` otherwise.
+    """
+    from omnigent.codex_native_app_server import _codex_provider_launch
+    from omnigent.errors import OmnigentError
+    from omnigent.onboarding.provider_config import (
+        SUBSCRIPTION_KIND,
+        default_provider_for_harness,
+        load_config,
+    )
+
+    try:
+        entry = default_provider_for_harness(load_config(), "codex")
+    except OmnigentError:
+        return False
+    if entry is None or entry.kind == SUBSCRIPTION_KIND:
+        # Subscription defers to Codex's own stored login (auth.json), so it
+        # does not satisfy the gate on its own.
+        return False
+    return _codex_provider_launch(entry, None) is not None
+
+
 def _codex_auth_unavailable_reason() -> str | None:
     """
     Return why local Codex is unavailable, or ``None`` when available.
@@ -200,9 +233,15 @@ def _codex_auth_unavailable_reason() -> str | None:
     if shutil.which(_DEFAULT_CODEX_COMMAND) is None:
         return _CODEX_AUTH_UNAVAILABLE_BINARY_MISSING
     source = _resolve_codex_auth_source()
-    if not _codex_auth_json_has_available_credential(source.auth_path):
-        return _CODEX_AUTH_UNAVAILABLE_NEEDS_AUTH
-    return None
+    if _codex_auth_json_has_available_credential(source.auth_path):
+        return None
+    # Windows-only, additive: a configured provider (no auth.json) routes Codex
+    # via an inline bearer header — the POSIX `sh`/`printf` auth.command path
+    # does not exist on a Windows codex child. Gated on IS_WINDOWS so POSIX
+    # readiness is unchanged (POSIX still requires auth.json here).
+    if IS_WINDOWS and _codex_configured_provider_routes():
+        return None
+    return _CODEX_AUTH_UNAVAILABLE_NEEDS_AUTH
 
 
 def _update_startup_progress(

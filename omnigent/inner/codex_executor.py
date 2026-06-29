@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, TypeAlias
 
+from omnigent._platform import IS_WINDOWS, WINDOWS_ENV_PASSTHROUGH
 from omnigent.llms._usage_observer import notify_from_dict as _notify_usage_from_dict
 from omnigent.reasoning_effort import CODEX_EFFORTS, validate_effort
 from omnigent.runner.identity import OMNIGENT_SESSION_ENV_VAR
@@ -386,6 +387,11 @@ def _clean_codex_env() -> dict[str, str]:
         "DATABRICKS_BEARER",  # explicit CI/integration bearer used by auth.command
         "DATABRICKS_CODEX_TOKEN",  # env_key referenced by ~/.codex/config.toml's DB provider
         OMNIGENT_SESSION_ENV_VAR,  # "inside Omnigent" marker (CLAUDE_CODE/CODEX analog)
+        # Windows Winsock/identity essentials: the codex app-server child opens a
+        # WebSocket listener, so a stripped env without SYSTEMROOT fast-fails before
+        # main (WSAEPROVIDERFAILEDINIT / 0xC0000409). Empty tuple on POSIX, so the
+        # POSIX allowlist is byte-for-byte unchanged.
+        *(WINDOWS_ENV_PASSTHROUGH if IS_WINDOWS else ()),
     }
     for key, value in os.environ.items():
         if key in _CODEX_ENV_DENY_EXACT:
@@ -804,6 +810,7 @@ def _provider_codex_config_overrides(
     base_url: str,
     auth_command: str,
     wire_api: str,
+    bearer_token: str | None = None,
 ) -> list[str]:
     """Return Codex config overrides routing through a generic provider.
 
@@ -827,10 +834,15 @@ def _provider_codex_config_overrides(
         no longer supported``), so a ``"chat"`` value is coerced to
         ``"responses"`` — the only wire codex still speaks — before being
         emitted. See the inline note for the OpenRouter caveat.
+    :param bearer_token: A resolved static API key for the provider. On
+        Windows it is carried as an inline ``http_headers`` Authorization
+        bearer instead of the ``auth.command`` form, because a Windows codex
+        child has no POSIX ``sh``/``printf`` to execute the auth command. On
+        POSIX (and whenever ``None``) the ``auth.command`` form is kept, so
+        POSIX output is byte-for-byte unchanged.
     :returns: Codex TOML-fragment override strings.
     """
     provider_name = "omnigent_provider"
-    auth_command_json = json.dumps(auth_command)
     # codex >= 0.137 removed the chat/completions wire from its config schema:
     # any provider block carrying wire_api="chat" makes codex hard-fail config
     # load ("wire_api = \"chat\" is no longer supported"), which broke OSS /
@@ -845,6 +857,20 @@ def _provider_codex_config_overrides(
     if model:
         overrides.append(f"model={json.dumps(model)}")
     overrides.append(f'model_provider="{provider_name}"')
+    if IS_WINDOWS and bearer_token is not None:
+        # Windows: no `sh`/`printf` on the codex child's PATH to run an
+        # auth.command, so a static key rides as an inline bearer header.
+        # json.dumps yields a valid TOML basic string (proper escaping).
+        header_value = json.dumps(f"Bearer {bearer_token}")
+        overrides.append(
+            f"model_providers.{provider_name}="
+            '{name="Omnigent Provider",'
+            f"base_url={json.dumps(base_url)},"
+            f"http_headers={{Authorization={header_value}}},"
+            f'wire_api="{effective_wire_api}"}}'
+        )
+        return overrides
+    auth_command_json = json.dumps(auth_command)
     overrides.append(
         f"model_providers.{provider_name}="
         '{name="Omnigent Provider",'

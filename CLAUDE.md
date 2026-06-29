@@ -6,12 +6,16 @@
 Upstream's native terminal harnesses run the agent CLI inside **tmux**, which is
 POSIX-only, so on Windows the terminal layer raised *"not supported."* This fork
 adds a parallel **ConPTY backend** (via [`pywinpty`](https://pypi.org/project/pywinpty/))
-so the **Claude Code** (`claude`) native harness runs on **Windows 11**, streamed to
-the Omnigent web UI.
+so native agent harnesses run on **Windows 11**, streamed to the Omnigent web UI.
 
-The change is **purely additive and `IS_WINDOWS`-guarded** — the POSIX/tmux path is
-untouched — and is scoped to the Claude Code harness. See `ARCHITECTURE.md` for the
-data-flow detail and `architecture.mmd` for the diagram.
+**Working native harnesses on Windows:** **Claude Code** (`claude`), **OpenCode**
+(`opencode`), **Pi** (`pi`), and **Codex** (`codex`). The remaining tmux-only ones
+(cursor / goose / qwen / kimi / hermes / kiro / antigravity) still need the port —
+the `diagnose-windows-native-harness` skill walks the recurring failure chain.
+
+Every change is **purely additive and `IS_WINDOWS`-guarded** — the POSIX/tmux path is
+untouched. See `ARCHITECTURE.md` for the data-flow detail and `architecture.mmd` for
+the diagram.
 
 ## The fork relationship (important)
 
@@ -87,6 +91,24 @@ data-flow detail and `architecture.mmd` for the diagram.
   the real load target). Both `filtered_server_env` and `opencode_terminal_env` pin
   `<bridge_dir>/tmp` via `_opencode_windows_tempdir`. The TUI is **not** an upstream-broken
   dead end — that was a misdiagnosis from testing under a bad sandbox `%TEMP%`.
+- **Codex on Windows runs via an OpenAI-compatible provider, not an OpenAI login.** Codex
+  needs auth omnigent recognizes; with no OpenAI account it routes through an `omnigent
+  setup` `key` provider (e.g. **Ollama Cloud**, `~/.omnigent/config.yaml` → `providers:` →
+  `kind: key`, `openai:` family, `base_url: https://ollama.com/v1`, `wire_api: responses`).
+  Four things make this work, all `IS_WINDOWS`-guarded & additive:
+  (1) **Wire:** codex ≥0.137 only speaks `responses` (it hard-fails on `wire_api="chat"`);
+  Ollama Cloud **does** implement `/v1/responses`, so they're compatible — verified, not
+  assumed. (2) **Auth:** the POSIX override uses `auth={command="sh",args=["-c","printf …"]}`
+  — there is no `sh`/`printf` on a Windows codex child, so `_provider_codex_config_overrides`
+  emits an inline `http_headers={Authorization="Bearer …"}` for a static key instead.
+  (3) **Env:** `_clean_codex_env` adds `WINDOWS_ENV_PASSTHROUGH` (`SystemRoot`) or the
+  `app-server` child fast-fails (`0xC0000409`). (4) **Readiness:** the gate
+  (`_codex_auth_unavailable_reason`) only checks `auth.json`; on Windows it now also accepts
+  a configured routable provider (`_codex_configured_provider_routes`) so the picker unblocks.
+  Custom provider IDs **cannot** be named `ollama` (reserved built-in = local Ollama) — omnigent
+  uses `omnigent_provider`. Gotcha when repro'ing by hand: `codex exec` **hangs reading stdin**
+  unless stdin is closed — the real path spawns with `stdin=DEVNULL`, so it's a test artifact,
+  not a bug (don't write codex off as broken from a manual hang).
 
 ## Pointers — where things live
 
@@ -102,6 +124,11 @@ data-flow detail and `architecture.mmd` for the diagram.
 | Windows unit tests | `tests/inner/test_terminal_windows.py` |
 | OpenCode Windows env (SystemRoot + writable TEMP) | `omnigent/opencode_native_app_server.py` (`filtered_server_env`, `opencode_terminal_env`, `_opencode_windows_tempdir`) |
 | OpenCode attach-TUI launch | `omnigent/runner/app.py` (`_auto_create_opencode_terminal`) |
+| Codex spawn env (SystemRoot) + Windows http_headers auth | `omnigent/inner/codex_executor.py` (`_clean_codex_env`, `_provider_codex_config_overrides`) |
+| Codex provider routing (static-key bearer threading) | `omnigent/codex_native_app_server.py` (`_codex_provider_launch`, `resolve_native_codex_launch`) |
+| Codex readiness gate (configured-provider on Windows) | `omnigent/codex_native.py` (`_codex_auth_unavailable_reason`, `_codex_configured_provider_routes`) |
+| Codex provider config (Ollama Cloud) | `~/.omnigent/config.yaml` `providers:` (`kind: key`, `openai`, `wire_api: responses`) |
+| Codex Windows unit tests | `tests/test_native_codex_provider.py`, `tests/test_codex_native.py` |
 
 ## Verifying a change
 
