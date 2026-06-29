@@ -157,14 +157,18 @@ Two Windows-specific facts shape the fork's behavior:
   Windows" terminal-start error. The passthrough is computed at call-time behind
   `IS_WINDOWS`, so POSIX env is unchanged.
 
-- **`opencode attach` can't render on Windows.** opencode's OpenTUI render library fails
-  to load its embedded native DLL on Windows (upstream Bun/Windows limitation —
-  `error 126`), so `attach` crashes on boot. The chat channel is unaffected, so
-  `_auto_create_opencode_terminal` (`omnigent/runner/app.py`) **degrades gracefully**:
-  on `IS_WINDOWS` it launches a lightweight PowerShell placeholder
-  (`_OPENCODE_WINDOWS_CHAT_ONLY_BANNER`) explaining the session is chat-only instead of
-  the doomed `attach`, keeping the server + forwarder (chat) fully live. POSIX still
-  attaches the real TUI.
+- **`opencode attach` (the TUI) needs a writable `%TEMP%`.** The attach process renders
+  opencode's UI via OpenTUI, whose native library is a DLL bun embeds in the compiled
+  `opencode.exe`. At startup bun **extracts** that DLL into `%TEMP%` and `dlopen`s the
+  real copy (the `B:/~BUN/root/...` shown in failures is just bun's virtual *source*
+  path). If `%TEMP%` is a restricted dir — e.g. `C:\WINDOWS\temp`, which the launch chain
+  can inherit — the extraction/exec is blocked and the load fails with `error 126`, so the
+  terminal view stays dead. The fix pins a guaranteed-writable, per-session temp dir:
+  `_opencode_windows_tempdir(bridge_dir)` → `<bridge_dir>/tmp`, injected as `TEMP`/`TMP`
+  by both `filtered_server_env` (serve) and `opencode_terminal_env` (attach) under
+  `IS_WINDOWS`. With that, opencode on Windows runs the **full** TUI exactly like POSIX.
+  (This was originally misdiagnosed as an unfixable upstream limitation — every "broken"
+  repro had run under a sandbox `TEMP=C:\WINDOWS\temp`.)
 
 ## 5. Alignment with upstream — merge surface
 
@@ -182,10 +186,9 @@ The fork stays mergeable with upstream because almost everything is additive:
 
 ## 6. Known limitations (Windows path)
 
-- **Claude Code (full TUI) + OpenCode (chat-only).** The claude-native path has both
-  chat and terminal views. The opencode-native path works as **chat-only** (see §4.8);
-  its TUI can't render on Windows. Other native harnesses (Codex, Cursor, Goose, Qwen)
-  still require tmux and are untested on Windows.
+- **Claude Code + OpenCode (both full TUI).** Both native paths have chat **and** terminal
+  views on Windows (opencode needs the `%TEMP%` fix in §4.8). Other native harnesses
+  (Codex, Cursor, Goose, Qwen) still require tmux and are untested on Windows.
 - The browser **Files** panel and terminal-list resource endpoints return `502` on
   Windows (resource proxy not wired up there yet); chat and terminal views are
   unaffected.
