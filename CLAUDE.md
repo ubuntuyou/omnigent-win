@@ -70,13 +70,15 @@ data-flow detail and `architecture.mmd` for the diagram.
 - **The auto-mode classifier blocks** direct pushes to `main` and edits to
   `.github/MAINTAINER` / CI approval gates without explicit user authorization. Hand the
   user the exact command instead.
-- **OpenCode runs chat-only on Windows.** `opencode serve` (chat over HTTP/SSE) works,
-  but `opencode attach` (the native TUI) can't load its OpenTUI render DLL on Windows
-  (upstream Bun limitation, `error 126`), so the terminal view is replaced by a
-  placeholder banner. Two Windows-only requirements: (1) `opencode serve` needs
-  `SystemRoot` in its env or it fast-fails with `0xC0000409` — `filtered_server_env`
-  adds `WINDOWS_ENV_PASSTHROUGH` behind `IS_WINDOWS`; (2) `_auto_create_opencode_terminal`
-  skips the doomed `attach` on `IS_WINDOWS`. Don't "fix" the missing TUI — it's upstream.
+- **OpenCode on Windows: full TUI, but two env essentials.** Both run behind `IS_WINDOWS`
+  in the opencode env builders. (1) `opencode serve` needs `SystemRoot` or it fast-fails
+  with `0xC0000409` — `filtered_server_env` adds `WINDOWS_ENV_PASSTHROUGH`. (2) The attach
+  TUI needs a **writable `TEMP`/`TMP`**: bun extracts opencode's embedded OpenTUI DLL into
+  `%TEMP%` and `dlopen`s it; a restricted temp like `C:\WINDOWS\temp` fails with `error 126`
+  ("module not found" — the `B:/~BUN/root/...` in the message is bun's *virtual* path, not
+  the real load target). Both `filtered_server_env` and `opencode_terminal_env` pin
+  `<bridge_dir>/tmp` via `_opencode_windows_tempdir`. The TUI is **not** an upstream-broken
+  dead end — that was a misdiagnosis from testing under a bad sandbox `%TEMP%`.
 
 ## Pointers — where things live
 
@@ -90,8 +92,8 @@ data-flow detail and `architecture.mmd` for the diagram.
 | UTF-8 stdin in hooks | `omnigent/claude_native_{hook,status,message_display_hook}.py` |
 | Frontend terminal client (pin/letterbox) | `ap-web/src/components/blocks/TerminalSession.ts` |
 | Windows unit tests | `tests/inner/test_terminal_windows.py` |
-| OpenCode serve env (SystemRoot passthrough) | `omnigent/opencode_native_app_server.py` (`filtered_server_env`, `IS_WINDOWS`) |
-| OpenCode chat-only degrade (skip `attach`) | `omnigent/runner/app.py` (`_auto_create_opencode_terminal`, `_OPENCODE_WINDOWS_CHAT_ONLY_BANNER`) |
+| OpenCode Windows env (SystemRoot + writable TEMP) | `omnigent/opencode_native_app_server.py` (`filtered_server_env`, `opencode_terminal_env`, `_opencode_windows_tempdir`) |
+| OpenCode attach-TUI launch | `omnigent/runner/app.py` (`_auto_create_opencode_terminal`) |
 
 ## Verifying a change
 
