@@ -109,6 +109,16 @@ the diagram.
   uses `omnigent_provider`. Gotcha when repro'ing by hand: `codex exec` **hangs reading stdin**
   unless stdin is closed — the real path spawns with `stdin=DEVNULL`, so it's a test artifact,
   not a bug (don't write codex off as broken from a manual hang).
+- **Codex CLI version is pinned to `0.139.0` — do NOT install latest.** omnigent's codex-native
+  transport spawns `codex app-server --listen <ws://…>` (JSON-RPC over a loopback WebSocket).
+  codex **0.142** removed the `--listen` flag (app-server went stdio-only + `daemon`/`proxy`
+  subcommands), so the app-server exits early with a clap usage error → the runner masks it as
+  the generic `native_terminal_start_failed` *"not supported on Windows"* (a **lie** — the ConPTY
+  terminal started fine; the real cause is `RuntimeError: Codex app-server exited early | Usage:
+  codex …` in the runner log). This is **platform-independent** version drift, not a Windows bug.
+  Pin: `npm install -g @openai/codex@0.139.0` (the `.github/ci-deps/package.json` pin omnigent is
+  validated against). Until omnigent's transport is ported to codex's new stdio app-server, stay
+  on 0.139.x.
 
 ## Pointers — where things live
 
