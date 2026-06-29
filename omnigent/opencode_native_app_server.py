@@ -252,6 +252,27 @@ def build_opencode_attach_args(
     return args
 
 
+def _opencode_windows_tempdir(bridge_dir: Path) -> str:
+    """
+    Return a guaranteed-writable temp dir for the opencode child on Windows.
+
+    Bun extracts the embedded OpenTUI native DLL into ``%TEMP%`` and ``dlopen``s
+    the real copy (the ``B:/~BUN/root/...`` path in the failure message is just
+    bun's virtual *source* path). If ``%TEMP%`` is a restricted dir — e.g.
+    ``C:\\WINDOWS\\temp``, which the launch chain can inherit — the extraction or
+    exec is blocked and the load fails with ``error 126``, so the TUI never
+    starts. Pin ``TEMP``/``TMP`` to a per-session dir under the bridge dir
+    (user-writable, session-scoped, cleaned with the session) so extraction
+    always succeeds.
+
+    :param bridge_dir: Native OpenCode bridge directory.
+    :returns: Absolute path to a writable temp directory.
+    """
+    tmp = bridge_dir / "tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    return str(tmp)
+
+
 def filtered_server_env(
     *,
     bridge_dir: Path,
@@ -290,6 +311,11 @@ def filtered_server_env(
     env["XDG_CONFIG_HOME"] = str(xdg_config_home_for_bridge_dir(bridge_dir))
     env[OPENCODE_SERVER_PASSWORD_ENV_VAR] = auth_secret
     env[OPENCODE_SERVER_USERNAME_ENV_VAR] = OPENCODE_DEFAULT_USERNAME
+    if IS_WINDOWS:
+        # Guarantee a writable TEMP so bun can extract+load native libs (see
+        # _opencode_windows_tempdir). ``serve`` doesn't load the OpenTUI render
+        # lib today, but pin it for parity with the attach TUI / future-proofing.
+        env["TEMP"] = env["TMP"] = _opencode_windows_tempdir(bridge_dir)
     return env
 
 
@@ -303,12 +329,18 @@ def opencode_terminal_env(server: OpenCodeNativeServer) -> dict[str, str]:
     :param server: The running server wrapper.
     :returns: Environment variables for the attach terminal process.
     """
-    return {
+    env = {
         OPENCODE_SERVER_PASSWORD_ENV_VAR: server.auth_secret,
         OPENCODE_SERVER_USERNAME_ENV_VAR: OPENCODE_DEFAULT_USERNAME,
         "XDG_DATA_HOME": str(server.xdg_data_home),
         "XDG_CONFIG_HOME": str(server.xdg_config_home),
     }
+    if IS_WINDOWS:
+        # The attach TUI loads the OpenTUI native DLL; without a writable TEMP
+        # bun's extraction fails with error 126 and the terminal view stays
+        # dead. Pin it to the per-session bridge temp dir.
+        env["TEMP"] = env["TMP"] = _opencode_windows_tempdir(server.bridge_dir)
+    return env
 
 
 class OpenCodeNativeServer:

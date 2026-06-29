@@ -118,11 +118,41 @@ def test_filtered_server_env_passes_windows_essentials(
     win_env = filtered_server_env(bridge_dir=tmp_path, auth_secret="pw")
     assert win_env["SYSTEMROOT"] == r"C:\Windows"
     assert win_env["APPDATA"] == r"C:\Users\me\AppData\Roaming"
+    # A guaranteed-writable TEMP/TMP is pinned so bun can extract+load native
+    # libs (OpenTUI DLL); a bad %TEMP% otherwise fails with error 126.
+    assert win_env["TEMP"] == str(tmp_path / "tmp")
+    assert win_env["TMP"] == str(tmp_path / "tmp")
+    assert (tmp_path / "tmp").is_dir()
 
     monkeypatch.setattr(appsrv, "IS_WINDOWS", False)
     posix_env = filtered_server_env(bridge_dir=tmp_path, auth_secret="pw")
     assert "SYSTEMROOT" not in posix_env
     assert "APPDATA" not in posix_env
+    assert "TEMP" not in posix_env
+    assert "TMP" not in posix_env
+
+
+def test_terminal_env_pins_windows_tempdir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The attach-TUI env pins a writable TEMP/TMP on Windows, none on POSIX.
+
+    The attach process loads the OpenTUI native DLL, which bun extracts into
+    ``%TEMP%``; without a writable temp the load fails with error 126 and the
+    terminal view stays dead. Gated on ``IS_WINDOWS`` so POSIX is unchanged.
+    """
+    server = _server(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(appsrv, "IS_WINDOWS", True)
+    win_env = opencode_terminal_env(server)
+    assert win_env["TEMP"] == str(server.bridge_dir / "tmp")
+    assert win_env["TMP"] == str(server.bridge_dir / "tmp")
+    assert (server.bridge_dir / "tmp").is_dir()
+
+    monkeypatch.setattr(appsrv, "IS_WINDOWS", False)
+    posix_env = opencode_terminal_env(server)
+    assert "TEMP" not in posix_env
+    assert "TMP" not in posix_env
 
 
 def test_filtered_server_env_drops_global_opencode_config(
