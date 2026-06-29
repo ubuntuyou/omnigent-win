@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 import json
 import os
 import sys
@@ -12,6 +11,7 @@ import pytest
 
 from omnigent import claude_native_message_display_hook as hook
 from omnigent.claude_native_bridge import read_message_deltas_from_offset
+from tests.native_hook_helpers import fake_stdin
 
 
 def _run_hook(
@@ -27,7 +27,7 @@ def _run_hook(
     :param monkeypatch: Pytest monkeypatch fixture used to set stdin.
     :returns: The hook's process exit code.
     """
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    monkeypatch.setattr(sys, "stdin", fake_stdin(json.dumps(payload)))
     return hook.main(["--bridge-dir", str(bridge_dir)])
 
 
@@ -164,7 +164,7 @@ def test_message_display_hook_swallows_malformed_json(
     """
     bridge_dir = tmp_path / "bridge"
     bridge_dir.mkdir()
-    monkeypatch.setattr(sys, "stdin", io.StringIO("{not json"))
+    monkeypatch.setattr(sys, "stdin", fake_stdin("{not json"))
     assert hook.main(["--bridge-dir", str(bridge_dir)]) == 0
     assert not (bridge_dir / hook.MESSAGE_DELTAS_FILE).exists()
     # Diagnostic goes to stderr so it never lands in Claude's stdout

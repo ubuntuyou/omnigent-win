@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 import json
 import re
 import sys
@@ -19,7 +18,7 @@ from omnigent.claude_native_bridge import (
     record_hook_event,
     write_active_session_id,
 )
-from tests.native_hook_helpers import make_failing_client
+from tests.native_hook_helpers import fake_stdin, make_failing_client
 
 
 @pytest.fixture(autouse=True)
@@ -54,7 +53,7 @@ def test_session_start_hook_records_transcript_state_without_output(
         "transcript_path": str(transcript_path),
     }
     monkeypatch.setattr("omnigent.claude_native_bridge._TRUSTED_PARENT", tmp_path)
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    monkeypatch.setattr(sys, "stdin", fake_stdin(json.dumps(payload)))
 
     exit_code = claude_native_hook.main(
         [
@@ -95,7 +94,7 @@ def test_session_start_hook_emits_conversation_url_system_message(
         "hook_event_name": "SessionStart",
         "transcript_path": str(transcript_path),
     }
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    monkeypatch.setattr(sys, "stdin", fake_stdin(json.dumps(payload)))
 
     exit_code = claude_native_hook.main(
         [
@@ -151,7 +150,7 @@ def test_session_start_hook_maps_workspace_hosted_server_to_ui_mount(
         "hook_event_name": "SessionStart",
         "transcript_path": str(tmp_path / "session.jsonl"),
     }
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    monkeypatch.setattr(sys, "stdin", fake_stdin(json.dumps(payload)))
 
     exit_code = claude_native_hook.main(["--bridge-dir", str(bridge_dir)])
 
@@ -296,7 +295,7 @@ def test_clear_session_start_hook_rotates_before_printing_conversation_url(
         "source": "clear",
         "transcript_path": str(tmp_path / "session.jsonl"),
     }
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    monkeypatch.setattr(sys, "stdin", fake_stdin(json.dumps(payload)))
 
     exit_code = claude_native_hook.main(["--bridge-dir", str(bridge_dir)])
 
@@ -502,7 +501,7 @@ def test_fork_session_start_hook_forks_before_printing_conversation_url(
         "session_title": "hello",
         "transcript_path": str(transcript_path),
     }
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    monkeypatch.setattr(sys, "stdin", fake_stdin(json.dumps(payload)))
 
     exit_code = claude_native_hook.main(["--bridge-dir", str(bridge_dir)])
 
@@ -611,7 +610,7 @@ def test_resume_session_start_without_branch_marker_does_not_fork(
         "session_id": "claude_other",
         "transcript_path": str(tmp_path / "resume.jsonl"),
     }
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    monkeypatch.setattr(sys, "stdin", fake_stdin(json.dumps(payload)))
 
     exit_code = claude_native_hook.main(["--bridge-dir", str(bridge_dir)])
 
@@ -640,7 +639,7 @@ def test_non_session_start_hook_does_not_emit_conversation_url_context(
     bridge_dir = tmp_path / "bridge"
     payload = {"hook_event_name": "Stop"}
     monkeypatch.setattr("omnigent.claude_native_bridge._TRUSTED_PARENT", tmp_path)
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    monkeypatch.setattr(sys, "stdin", fake_stdin(json.dumps(payload)))
 
     exit_code = claude_native_hook.main(
         [
@@ -740,7 +739,7 @@ def test_permission_request_hook_posts_to_active_session_from_bridge_config(
         ap_auth_headers={"Authorization": "Bearer xyz"},
     )
     payload = {"hook_event_name": "PermissionRequest", "tool_name": "Bash"}
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    monkeypatch.setattr(sys, "stdin", fake_stdin(json.dumps(payload)))
 
     exit_code = claude_native_hook.main(
         [
@@ -872,7 +871,7 @@ def test_permission_request_hook_retries_transport_cut_with_same_id(
     monkeypatch.setattr(claude_native_hook, "_PERMISSION_RETRY_INITIAL_BACKOFF_S", 0.0)
     bridge_dir = _prepare_permission_bridge(tmp_path, "conv_retry")
     payload = {"hook_event_name": "PermissionRequest", "tool_name": "Bash"}
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    monkeypatch.setattr(sys, "stdin", fake_stdin(json.dumps(payload)))
 
     exit_code = claude_native_hook.main(["permission-request", "--bridge-dir", str(bridge_dir)])
 
@@ -963,7 +962,7 @@ def test_permission_request_hook_does_not_retry_rejections(
     monkeypatch.setattr(claude_native_hook, "_PERMISSION_RETRY_INITIAL_BACKOFF_S", 0.0)
     bridge_dir = _prepare_permission_bridge(tmp_path, "conv_reject")
     payload = {"hook_event_name": "PermissionRequest", "tool_name": "Bash"}
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    monkeypatch.setattr(sys, "stdin", fake_stdin(json.dumps(payload)))
 
     exit_code = claude_native_hook.main(["permission-request", "--bridge-dir", str(bridge_dir)])
 
@@ -1203,7 +1202,7 @@ def test_evaluate_policy_pre_tool_use_converts_and_returns_deny(
         "tool_name": "Bash",
         "tool_input": {"command": "rm -rf /"},
     }
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    monkeypatch.setattr(sys, "stdin", fake_stdin(json.dumps(payload)))
 
     exit_code = claude_native_hook.main(
         [
@@ -1284,7 +1283,7 @@ def test_evaluate_policy_stamps_live_model_from_context_json(
         json.dumps({"model": "claude-sonnet-4-6"}), encoding="utf-8"
     )
     payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    monkeypatch.setattr(sys, "stdin", fake_stdin(json.dumps(payload)))
 
     exit_code = claude_native_hook.main(["evaluate-policy", "--bridge-dir", str(bridge_dir)])
 
@@ -1382,7 +1381,7 @@ def test_evaluate_policy_post_tool_use_converts_and_returns_context(
         "tool_input": {"command": "cat /etc/passwd"},
         "tool_output": "root:x:0:0:root:/root:/bin/bash",
     }
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    monkeypatch.setattr(sys, "stdin", fake_stdin(json.dumps(payload)))
 
     exit_code = claude_native_hook.main(
         [
@@ -1480,7 +1479,7 @@ def test_ask_user_question_hook_noop_in_non_bypass_mode(
         }
         if mode is not None:
             payload["permission_mode"] = mode
-        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+        monkeypatch.setattr(sys, "stdin", fake_stdin(json.dumps(payload)))
         exit_code = claude_native_hook.main(["ask-user-question", "--bridge-dir", str(bridge_dir)])
         captured = capsys.readouterr()
         # No Omnigent call, no output — "no opinion" so PermissionRequest takes over.
@@ -1593,7 +1592,7 @@ def test_ask_user_question_hook_posts_and_returns_pre_tool_use_output_in_bypass_
         },
         "permission_mode": "bypassPermissions",
     }
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    monkeypatch.setattr(sys, "stdin", fake_stdin(json.dumps(payload)))
 
     exit_code = claude_native_hook.main(["ask-user-question", "--bridge-dir", str(bridge_dir)])
 
@@ -1703,7 +1702,7 @@ def test_ask_user_question_hook_returns_deny_without_updated_input(
         "tool_input": {"questions": []},
         "permission_mode": "bypassPermissions",
     }
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    monkeypatch.setattr(sys, "stdin", fake_stdin(json.dumps(payload)))
 
     exit_code = claude_native_hook.main(["ask-user-question", "--bridge-dir", str(bridge_dir)])
 
@@ -1744,7 +1743,7 @@ def test_evaluate_policy_pre_tool_use_fails_closed_when_verdict_unavailable(
         "tool_name": "Bash",
         "tool_input": {"command": "rm -rf /"},
     }
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    monkeypatch.setattr(sys, "stdin", fake_stdin(json.dumps(payload)))
 
     exit_code = claude_native_hook.main(["evaluate-policy", "--bridge-dir", str(bridge_dir)])
 
@@ -1786,7 +1785,7 @@ def test_evaluate_policy_non_tool_call_phases_fail_open_on_error(
     bridge_dir = prepare_bridge_dir("conv_abc", bridge_id="bridge_shared", workspace=tmp_path)
     write_active_session_id(bridge_dir, "conv_active")
     build_hook_settings(bridge_dir, ap_server_url="http://127.0.0.1:8787")
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    monkeypatch.setattr(sys, "stdin", fake_stdin(json.dumps(payload)))
 
     exit_code = claude_native_hook.main(["evaluate-policy", "--bridge-dir", str(bridge_dir)])
 
@@ -1865,7 +1864,7 @@ def test_evaluate_policy_retries_5xx_and_succeeds(
         "tool_name": "Bash",
         "tool_input": {"command": "ls"},
     }
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    monkeypatch.setattr(sys, "stdin", fake_stdin(json.dumps(payload)))
 
     exit_code = claude_native_hook.main(["evaluate-policy", "--bridge-dir", str(bridge_dir)])
 
@@ -1977,7 +1976,7 @@ def test_evaluate_policy_reauths_on_expired_token_instead_of_failing_closed(
         "tool_name": "Bash",
         "tool_input": {"command": "ls"},
     }
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    monkeypatch.setattr(sys, "stdin", fake_stdin(json.dumps(payload)))
 
     exit_code = claude_native_hook.main(["evaluate-policy", "--bridge-dir", str(bridge_dir)])
 
@@ -2044,7 +2043,7 @@ def test_evaluate_policy_fails_closed_when_reauth_unavailable(
         "tool_name": "Bash",
         "tool_input": {"command": "ls"},
     }
-    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    monkeypatch.setattr(sys, "stdin", fake_stdin(json.dumps(payload)))
 
     exit_code = claude_native_hook.main(["evaluate-policy", "--bridge-dir", str(bridge_dir)])
 
