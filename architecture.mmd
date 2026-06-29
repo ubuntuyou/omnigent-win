@@ -1,6 +1,14 @@
 %% omnigent-win — Windows ConPTY architecture for the claude-native harness.
 %% Additive, IS_WINDOWS-guarded; the POSIX/tmux path is upstream-unchanged.
 %% See ARCHITECTURE.md for the prose walkthrough.
+%%
+%% The graph below is the claude-native canonical flow. The other working Windows
+%% harnesses share the TERMINAL-VIEW half (ConPTY → ws_bridge) and feed the CHAT
+%% VIEW via a different source than claude's JSONL transcript forwarder:
+%%   - goose:    SQLite-tail forwarder over Goose's sessions.db   (ARCHITECTURE.md §4.9)
+%%   - opencode: `opencode serve` REST + SSE                      (ARCHITECTURE.md §4.8)
+%% Goose, like claude, is a TUI-mirror harness — same injection-server input path;
+%% only the chat-view source differs. See the "altchat" note in the diagram.
 
 flowchart TB
     subgraph browser["Browser (web UI)"]
@@ -56,7 +64,13 @@ flowchart TB
     inj --> writeq
     writeq -->|literal keystrokes| claude
 
+    %% alternate chat-view sources for the other Windows harnesses (opencode / goose)
+    altchat["goose: SQLite-tail forwarder over sessions.db (TUI-mirror,<br/>same injection-server input path) · §4.9<br/>opencode: serve REST+SSE (server transport) · §4.8<br/>— each replaces the JSONL transcript forwarder for the CHAT VIEW"]
+    altchat -.->|external_conversation_item| persist
+
     classDef winfork fill:#cfe8ff,stroke:#3b82f6,color:#0b2942;
     classDef child fill:#fde9c8,stroke:#d97706,color:#3a2606;
+    classDef altnote fill:#e7e0ff,stroke:#7c3aed,color:#2a1a4a,stroke-dasharray:4 3;
     class inst,reader,writeq,inj,size,fwd,wsbridge,term winfork;
     class claude,jsonl,hooks child;
+    class altchat altnote;
