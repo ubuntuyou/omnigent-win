@@ -170,6 +170,45 @@ Two Windows-specific facts shape the fork's behavior:
   (This was originally misdiagnosed as an unfixable upstream limitation — every "broken"
   repro had run under a sandbox `TEMP=C:\WINDOWS\temp`.)
 
+## 4.9 Goose native on Windows (TUI-mirror, like Claude)
+
+Goose is a **TUI-mirror** harness — the same shape as claude-native, not the
+server-transport shape of opencode. The runner launches `goose session` in a ConPTY,
+mirrors its conversation into the chat view, and injects web turns into the same pane.
+Three pieces make it work on Windows; each is additive and `IS_WINDOWS`-guarded.
+
+- **Injection (no tmux).** On POSIX `goose_native_bridge.inject_user_message` /
+  `inject_interrupt` shell out to tmux `send-keys`. On Windows they route through the
+  runner's loopback **injection server** — the cross-process channel the runner owns for
+  the in-process ConPTY — by reusing the single client in `claude_native_bridge`
+  (`_inject_via_injection_server`), so the socket-framing logic has one home. The runner's
+  `_auto_create_goose_terminal` stands up `ensure_injection_server(instance)` and
+  advertises its `host`/`port`/`token` into the bridge's `tmux.json`; `write_tmux_target`
+  gained those optional fields. The injection server's readiness gate keys on the
+  bracketed-paste enable (`\x1b[?2004h`), which Goose's TUI emits like Claude's — worst
+  case is a best-effort inject at the deadline, never a silent drop.
+
+- **Transcript forwarder + Windows store path.** `goose_native_forwarder` tails Goose's
+  SQLite `sessions.db` (discovery by the launch-unique `--name`, idempotent high-water
+  cursor). The store path differs by OS: Goose resolves its data dir via the `etcetera`
+  `Block`/`goose` app strategy, which on Windows is Roaming AppData —
+  `%APPDATA%\Block\goose\data\sessions\sessions.db` — versus the POSIX XDG
+  `~/.local/share/goose/sessions/sessions.db`. `default_sessions_db` branches on
+  `IS_WINDOWS`; `GOOSE_SESSIONS_DB` overrides for non-standard installs (confirm with
+  `goose info -v`). Everything else in the forwarder is platform-agnostic.
+
+- **Picker seeding (platform-independent prerequisite).** Goose is a first-class native
+  agent in code but was never seeded into the agent DB at startup, so it was invisible in
+  the new-session picker on *every* platform. `_ensure_default_goose_agent`
+  (`omnigent/server/app.py`, mirroring cursor) fixes that. Provider/auth is Goose's own
+  (`goose configure`); Omnigent writes no Goose config.
+
+**Deferred:** web tool-approval cards. Goose runs `GOOSE_MODE=smart_approve` and prompts
+in its TUI (mirrored into the embedded terminal view, where the user approves). Surfacing
+that as a web elicitation needs a raw-keystroke injection kind — the cliclack selector is
+driven with arrow keys, which the current `message`/`interrupt` injection protocol can't
+express. See `goose_native_permissions.py`.
+
 ## 5. Alignment with upstream — merge surface
 
 The fork stays mergeable with upstream because almost everything is additive:
@@ -186,9 +225,11 @@ The fork stays mergeable with upstream because almost everything is additive:
 
 ## 6. Known limitations (Windows path)
 
-- **Claude Code + OpenCode (both full TUI).** Both native paths have chat **and** terminal
-  views on Windows (opencode needs the `%TEMP%` fix in §4.8). Other native harnesses
-  (Codex, Cursor, Goose, Qwen) still require tmux and are untested on Windows.
+- **Claude Code, OpenCode, and Goose run on Windows.** Claude (§4.3–4.7) and Goose (§4.9)
+  are TUI-mirror harnesses with chat **and** terminal views; OpenCode (§4.8, server
+  transport) also has both (it needs the `%TEMP%` fix). Codex and Pi are ported on
+  in-flight branches; the remaining tmux-only harnesses (Cursor, Qwen, Kimi, Hermes, Kiro,
+  Antigravity) are not yet on Windows. Goose's web tool-approval cards are deferred (§4.9).
 - The browser **Files** panel and terminal-list resource endpoints return `502` on
   Windows (resource proxy not wired up there yet); chat and terminal views are
   unaffected.

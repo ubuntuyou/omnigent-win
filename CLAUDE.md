@@ -6,12 +6,17 @@
 Upstream's native terminal harnesses run the agent CLI inside **tmux**, which is
 POSIX-only, so on Windows the terminal layer raised *"not supported."* This fork
 adds a parallel **ConPTY backend** (via [`pywinpty`](https://pypi.org/project/pywinpty/))
-so the **Claude Code** (`claude`) native harness runs on **Windows 11**, streamed to
-the Omnigent web UI.
+so native agent harnesses run on **Windows 11**, streamed to the Omnigent web UI.
 
-The change is **purely additive and `IS_WINDOWS`-guarded** — the POSIX/tmux path is
-untouched — and is scoped to the Claude Code harness. See `ARCHITECTURE.md` for the
-data-flow detail and `architecture.mmd` for the diagram.
+**Working native harnesses on Windows (this branch):** **Claude Code** (`claude`),
+**OpenCode** (`opencode`), and **Goose** (`goose`). Codex (`codex`) and Pi (`pi`) are
+ported on their own in-flight branches; the remaining tmux-only ones (cursor / qwen /
+kimi / hermes / kiro / antigravity) still need the port — the
+`diagnose-windows-native-harness` skill walks the recurring failure chain.
+
+Every change is **purely additive and `IS_WINDOWS`-guarded** — the POSIX/tmux path is
+untouched. See `ARCHITECTURE.md` for the data-flow detail and `architecture.mmd` for the
+diagram.
 
 ## The fork relationship (important)
 
@@ -87,6 +92,27 @@ data-flow detail and `architecture.mmd` for the diagram.
   the real load target). Both `filtered_server_env` and `opencode_terminal_env` pin
   `<bridge_dir>/tmp` via `_opencode_windows_tempdir`. The TUI is **not** an upstream-broken
   dead end — that was a misdiagnosis from testing under a bad sandbox `%TEMP%`.
+- **Goose on Windows: a TUI-mirror harness like Claude, plus two platform branches.**
+  Goose ships a real Rust `goose.exe` (no `.CMD` shim, no `%TEMP%` extraction), is
+  provider-agnostic, and owns its own auth — the user runs `goose configure` once (e.g.
+  Ollama Cloud → host `https://ollama.com` + key). Omnigent writes **no** Goose config.
+  (1) **Seeding gap (platform-independent).** Goose is a first-class native agent in
+  `native_coding_agents.py` but was never seeded into the agent DB at startup, so it was
+  absent from the new-session picker on *every* platform. `_ensure_default_goose_agent` in
+  `omnigent/server/app.py` now seeds it (mirrors cursor). Hermes still has this gap.
+  (2) **Injection.** Like Claude, web-chat turns reach the TUI by injection, not a server
+  transport. On Windows `goose_native_bridge.inject_user_message`/`inject_interrupt` route
+  through the runner's loopback injection server (reusing the single client in
+  `claude_native_bridge`) instead of tmux `send-keys`; `_auto_create_goose_terminal`
+  stands up `ensure_injection_server` and advertises `host/port/token` in `tmux.json`.
+  (3) **Transcript store path.** The forwarder tails Goose's SQLite `sessions.db`. On
+  Windows that lives at `%APPDATA%\Block\goose\data\sessions\sessions.db` (etcetera
+  `Block`/`goose` strategy → Roaming AppData), not the POSIX `~/.local/share/goose/...`;
+  `default_sessions_db` branches on `IS_WINDOWS` (override: `GOOSE_SESSIONS_DB` — confirm
+  with `goose info -v`). (4) **Approval mirror is deferred on Windows.** Goose runs
+  `GOOSE_MODE=smart_approve`; approve/deny tool calls **in the embedded terminal view**.
+  Web approval cards need a raw-keystroke injection kind (the cliclack selector is driven
+  with arrow keys) — a follow-up, see `goose_native_permissions.py`.
 
 ## Pointers — where things live
 
@@ -102,6 +128,11 @@ data-flow detail and `architecture.mmd` for the diagram.
 | Windows unit tests | `tests/inner/test_terminal_windows.py` |
 | OpenCode Windows env (SystemRoot + writable TEMP) | `omnigent/opencode_native_app_server.py` (`filtered_server_env`, `opencode_terminal_env`, `_opencode_windows_tempdir`) |
 | OpenCode attach-TUI launch | `omnigent/runner/app.py` (`_auto_create_opencode_terminal`) |
+| Goose picker seeding | `omnigent/server/app.py` (`_ensure_default_goose_agent`, `_build_goose_native_bundle`) |
+| Goose injection (Windows branch) + injection advertise | `omnigent/goose_native_bridge.py` (`inject_user_message`, `inject_interrupt`, `write_tmux_target`) |
+| Goose terminal auto-create + injection server | `omnigent/runner/app.py` (`_auto_create_goose_terminal`) |
+| Goose transcript forwarder + Windows SQLite path | `omnigent/goose_native_forwarder.py` (`default_sessions_db`) |
+| Goose Windows unit tests | `tests/test_goose_native_bridge.py`, `tests/test_goose_native_forwarder.py` |
 
 ## Verifying a change
 

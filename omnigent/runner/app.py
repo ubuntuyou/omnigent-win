@@ -184,6 +184,13 @@ _SUBAGENT_DELIVERY_UNTRACKED = "untracked"
 _SUBAGENT_DELIVERY_MISSING_WORK_ENTRY = "missing_work_entry"
 _SUBAGENT_DELIVERY_MISSING_PARENT_INBOX = "missing_parent_inbox"
 _NATIVE_TERMINAL_START_FAILED_CODE = "native_terminal_start_failed"
+# Native-terminal harnesses ported to the Windows ConPTY backend. For these a
+# start failure is a *real* error (the ConPTY itself works), so the client gets
+# "see runner logs" rather than the misleading "not supported on Windows" — which
+# would send the user chasing a non-existent platform limitation. The remaining
+# tmux-only harnesses (cursor / qwen / kimi / kiro / antigravity / hermes) keep
+# the accurate "not supported" message. Lowercased runtime names.
+_WINDOWS_NATIVE_TERMINAL_HARNESSES = frozenset({"claude", "codex", "pi", "opencode", "goose"})
 # Read budget for runner→server POSTs that can PARK behind a human-approval
 # ASK gate: policy evaluation (``_evaluate_policy_via_omnigent``) and sub-agent
 # wake-notice delivery (``_deliver_subagent_wake_post``). Both are gated at the
@@ -2328,11 +2335,28 @@ async def _auto_create_goose_terminal(
     if terminal_registry is not None:
         instance = terminal_registry.get(session_id, "goose", "main")
         if instance is not None and instance.running:
-            write_tmux_target(
-                bridge_dir,
-                socket_path=instance.socket_path,
-                tmux_target=instance.tmux_target,
-            )
+            if IS_WINDOWS:
+                # ConPTY backend: no tmux socket. Stand up (idempotently) the
+                # instance's loopback injection server and advertise its endpoint
+                # so the out-of-process goose-native executor can inject web-chat
+                # messages. The tmux fields stay as harmless placeholders.
+                from omnigent.inner.terminal_windows import ensure_injection_server
+
+                server = ensure_injection_server(instance)
+                write_tmux_target(
+                    bridge_dir,
+                    socket_path=instance.socket_path,
+                    tmux_target=instance.tmux_target,
+                    input_host=server.host,
+                    input_port=server.port,
+                    input_token=server.token,
+                )
+            else:
+                write_tmux_target(
+                    bridge_dir,
+                    socket_path=instance.socket_path,
+                    tmux_target=instance.tmux_target,
+                )
     publish_event(
         session_id,
         {
@@ -4882,15 +4906,17 @@ def _native_terminal_start_error_payload(exc: BaseException, runtime_name: str) 
         the raw cause is logged for operators, not surfaced to the caller.
     """
     _logger.warning("Native %s terminal start failed: %s", runtime_name, exc, exc_info=True)
-    if IS_WINDOWS:
-        # Native terminals are tmux/PTY-based and disabled on Windows by design.
-        # Give the client an actionable message instead of "see runner logs".
+    if IS_WINDOWS and runtime_name.lower() not in _WINDOWS_NATIVE_TERMINAL_HARNESSES:
+        # Still-tmux-only harness: native terminals are tmux/PTY-based and not yet
+        # ported to the ConPTY backend. Give the client an actionable message.
         message = (
             f"Native {runtime_name} terminal (tmux/PTY) is not supported on "
             "Windows. Use an SDK-based harness (e.g. claude-sdk, cursor, "
             "copilot, or codex) for this agent, or run it on Linux/macOS."
         )
     else:
+        # POSIX, or a harness ported to the Windows ConPTY backend: the terminal
+        # layer works, so a start failure is a real error, not a platform limit.
         message = f"Native {runtime_name} terminal failed to start; see runner logs for details."
     return {"code": _NATIVE_TERMINAL_START_FAILED_CODE, "message": message}
 
