@@ -11040,6 +11040,81 @@ async def test_events_compact_on_codex_native_injects_slash_command(
 
 
 @pytest.mark.asyncio
+async def test_events_compact_on_codex_native_windows_injects_via_conpty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    On Windows codex-native ``/compact`` injects through the ConPTY instance, not tmux.
+
+    A Windows codex terminal is a ConPTY with no tmux socket, so the tmux
+    ``send-keys`` path raises ``[WinError 2]`` (the same class of bug that broke
+    claude-native ``/compact``). The handler must reuse the instance's
+    literal-keystroke ``inject_slash_command`` method instead of shelling out.
+    """
+    from omnigent.runner.app import _session_event_queues_ref
+
+    def _boom_tmux(*_a: object, **_k: object) -> None:
+        raise AssertionError("tmux path used on Windows codex compact")
+
+    monkeypatch.setattr(claude_native_bridge, "_run_tmux", _boom_tmux)
+    monkeypatch.setattr("omnigent.runner.app.IS_WINDOWS", True)
+
+    class _RecordingConptyInstance:
+        """Minimal ConPTY stand-in recording slash injections (no real console)."""
+
+        def __init__(self) -> None:
+            self.running = True
+            self.slash_calls: list[str] = []
+
+        async def inject_slash_command(self, command: str, *, auto_confirm: bool = False) -> None:
+            self.slash_calls.append(command)
+
+    codex_native_spec = AgentSpec(
+        spec_version=1,
+        name="t",
+        executor=ExecutorSpec(type="omnigent", config={"harness": "codex-native"}),
+    )
+
+    async def _resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
+        del agent_id, session_id
+        return codex_native_spec
+
+    conv_id = "conv_codex_compact_windows"
+    terminal_registry = TerminalRegistry()
+    instance = _RecordingConptyInstance()
+    terminal_registry._by_conversation.setdefault(conv_id, {})[("codex", "main")] = instance
+
+    pm = _FakeProcessManager(_ScriptedHarnessClient([]))
+    app = create_runner_app(
+        process_manager=pm,  # type: ignore[arg-type]
+        spec_resolver=_resolver,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+        terminal_registry=terminal_registry,
+    )
+
+    async with _runner_client(app) as client:
+        create_resp = await client.post(
+            "/v1/sessions",
+            json={"session_id": conv_id, "agent_id": "ag_1"},
+        )
+        assert create_resp.status_code == 201, create_resp.text
+        _drain_session_event_queue(_session_event_queues_ref.get(conv_id))
+
+        resp = await client.post(
+            f"/v1/sessions/{conv_id}/events",
+            json={"type": "compact"},
+        )
+
+    assert resp.status_code == 200, (
+        f"Windows codex-native compact must return 200; got {resp.status_code}: {resp.text}"
+    )
+    assert instance.slash_calls == ["/compact"], (
+        f"Windows codex compact must inject /compact via the ConPTY instance; "
+        f"got {instance.slash_calls!r}."
+    )
+
+
+@pytest.mark.asyncio
 async def test_events_compact_on_codex_native_returns_204_when_no_terminal() -> None:
     """
     Codex-native compact returns 204 when no live terminal is registered.

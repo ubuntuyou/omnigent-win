@@ -11435,11 +11435,17 @@ def create_runner_app(
             # No live codex terminal — let the server run AP-side compaction.
             return Response(status_code=204)
 
-        socket_path = str(instance.socket_path)
-        target = instance.tmux_target
-
         try:
-            await asyncio.to_thread(_inject_codex_compact, socket_path, target)
+            if IS_WINDOWS:
+                # ConPTY backend: there is no tmux socket. Reuse the instance's
+                # literal-keystroke slash injection (C-u -> /compact -> Enter) —
+                # the same path claude-native uses on Windows — instead of
+                # shelling out to ``tmux send-keys`` (which raises [WinError 2]).
+                await instance.inject_slash_command("/compact")
+            else:
+                await asyncio.to_thread(
+                    _inject_codex_compact, str(instance.socket_path), instance.tmux_target
+                )
         except (RuntimeError, ValueError) as exc:
             return JSONResponse(
                 status_code=503,
