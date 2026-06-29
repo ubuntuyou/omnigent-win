@@ -39,6 +39,7 @@ from pathlib import Path
 import httpx
 from packaging.version import InvalidVersion, Version
 
+from omnigent._platform import IS_WINDOWS, WINDOWS_ENV_PASSTHROUGH
 from omnigent.opencode_native_bridge import (
     OPENCODE_DEFAULT_USERNAME,
     OPENCODE_SERVER_PASSWORD_ENV_VAR,
@@ -269,13 +270,20 @@ def filtered_server_env(
     :param extra_env: Additional provider env (e.g. from Omnigent setup).
     :returns: The environment mapping for the server subprocess.
     """
+    # On Windows the ``opencode serve`` child (a Bun binary) fast-fails at
+    # startup with exit ``0xC0000409`` when ``SystemRoot`` is absent — the
+    # filtered env otherwise drops it, since it matches none of the prefixes
+    # /keys below. Add the Windows OS-essentials (SYSTEMROOT, APPDATA, …) to the
+    # allowlist there; the tuple is empty on POSIX, so the POSIX env is
+    # unchanged. See ``omnigent._platform`` for the per-var rationale.
+    passthrough_keys = _ENV_PASSTHROUGH_KEYS + (WINDOWS_ENV_PASSTHROUGH if IS_WINDOWS else ())
     env: dict[str, str] = {}
     for key, value in os.environ.items():
         if key in _ENV_OPENCODE_CONFIG_DENYLIST:
             # Never inherit the parent's global OpenCode config — the
             # per-session XDG dirs are the only config source.
             continue
-        if key in _ENV_PASSTHROUGH_KEYS or key.startswith(_ENV_PASSTHROUGH_PREFIXES):
+        if key in passthrough_keys or key.startswith(_ENV_PASSTHROUGH_PREFIXES):
             env[key] = value
     env.update(extra_env or {})
     env["XDG_DATA_HOME"] = str(xdg_data_home_for_bridge_dir(bridge_dir))
