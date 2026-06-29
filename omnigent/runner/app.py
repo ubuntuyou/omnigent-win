@@ -1014,6 +1014,20 @@ async def _opencode_native_launch_config(
     )
 
 
+_OPENCODE_WINDOWS_CHAT_ONLY_BANNER = (
+    "Write-Host '';"
+    "Write-Host '  OpenCode TUI is unavailable on Windows.' -ForegroundColor Yellow;"
+    "Write-Host '';"
+    "Write-Host '  OpenCodes terminal interface cannot load its native render';"
+    "Write-Host '  library (opentui) on Windows - an upstream limitation.';"
+    "Write-Host '';"
+    "Write-Host '  Chat works normally: use the chat view for this session.' "
+    "-ForegroundColor Cyan;"
+    "Write-Host '';"
+    "while ($true) { Start-Sleep -Seconds 86400 }"
+)
+
+
 async def _auto_create_opencode_terminal(
     session_id: str,
     resource_registry: SessionResourceRegistry,
@@ -1279,6 +1293,31 @@ async def _auto_create_opencode_terminal(
         _register_auto_forwarder_task(session_id, forwarder_task)
 
     agent_os_env = _agent_os_env_from_spec(agent_spec)
+    # On Windows ``opencode attach`` (the native TUI) cannot start: opencode's
+    # OpenTUI render library fails to load its embedded native DLL (upstream
+    # Bun/Windows limitation — error 126), so the attach process crashes on boot
+    # and the terminal panel renders dead/empty. The HTTP server + SSE forwarder
+    # started above already drive the chat view, so degrade gracefully: launch a
+    # lightweight placeholder that explains the session is chat-only instead of
+    # the doomed attach. POSIX is unchanged — it still attaches the real TUI.
+    if IS_WINDOWS:
+        terminal_command = "powershell.exe"
+        terminal_args: list[str] = [
+            "-NoLogo",
+            "-NoProfile",
+            "-Command",
+            _OPENCODE_WINDOWS_CHAT_ONLY_BANNER,
+        ]
+        terminal_env: dict[str, str] = {}
+    else:
+        terminal_command = server.opencode_path
+        terminal_args = build_opencode_attach_args(
+            server_url=server.base_url,
+            workspace=workspace,
+            session_id=opencode_session_id,
+            opencode_args=tuple(launch_config.terminal_launch_args or ()),
+        )
+        terminal_env = opencode_terminal_env(server)
     try:
         terminal_view = await resource_registry.launch_auxiliary_terminal(
             session_id=session_id,
@@ -1292,14 +1331,9 @@ async def _auto_create_opencode_terminal(
                     cwd=workspace,
                     sandbox=(agent_os_env.sandbox if agent_os_env is not None else None),
                 ),
-                command=server.opencode_path,
-                args=build_opencode_attach_args(
-                    server_url=server.base_url,
-                    workspace=workspace,
-                    session_id=opencode_session_id,
-                    opencode_args=tuple(launch_config.terminal_launch_args or ()),
-                ),
-                env=opencode_terminal_env(server),
+                command=terminal_command,
+                args=terminal_args,
+                env=terminal_env,
                 scrollback=100_000,
                 tmux_allow_passthrough=True,
                 tmux_start_on_attach=False,

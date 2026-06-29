@@ -101,6 +101,30 @@ def test_filtered_server_env_sets_xdg_and_password(
     assert "RANDOM_UNRELATED" not in env  # unrelated env filtered out
 
 
+def test_filtered_server_env_passes_windows_essentials(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """On Windows the OS-essentials (``SYSTEMROOT`` …) must pass through.
+
+    ``opencode serve`` (a Bun binary) fast-fails at startup with exit
+    ``0xC0000409`` when launched without ``SystemRoot``; the filtered env
+    otherwise drops it. The passthrough is gated on the module's
+    ``IS_WINDOWS`` so POSIX env is unchanged — assert both directions.
+    """
+    monkeypatch.setenv("SYSTEMROOT", r"C:\Windows")
+    monkeypatch.setenv("APPDATA", r"C:\Users\me\AppData\Roaming")
+
+    monkeypatch.setattr(appsrv, "IS_WINDOWS", True)
+    win_env = filtered_server_env(bridge_dir=tmp_path, auth_secret="pw")
+    assert win_env["SYSTEMROOT"] == r"C:\Windows"
+    assert win_env["APPDATA"] == r"C:\Users\me\AppData\Roaming"
+
+    monkeypatch.setattr(appsrv, "IS_WINDOWS", False)
+    posix_env = filtered_server_env(bridge_dir=tmp_path, auth_secret="pw")
+    assert "SYSTEMROOT" not in posix_env
+    assert "APPDATA" not in posix_env
+
+
 def test_filtered_server_env_drops_global_opencode_config(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
