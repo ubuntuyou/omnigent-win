@@ -270,10 +270,20 @@ def _trusted_parent_for_bridge_dir(target: Path) -> Path:
             trusted_parent = opencode_root.parent.parent
         return _absolute_syntactic_path(trusted_parent)
 
+    from omnigent.goose_native_bridge import bridge_root as goose_bridge_root
+
+    goose_root = _absolute_syntactic_path(goose_bridge_root())
+    if target.is_relative_to(goose_root):
+        # Same shape as cursor-native ($TMPDIR/omnigent-<uid>/goose-native): trust
+        # the uid-scoped temp dir's parent and validate/chmod the two
+        # bridge-owned directories below it.
+        return _absolute_syntactic_path(goose_root.parent.parent)
+
     raise RuntimeError(
         f"bridge dir {target!s} is not under an allowed bridge root "
         f"({claude_root!s}, {codex_root!s}, {cursor_root!s}, "
-        f"{antigravity_root!s}, {qwen_root!s}, {hermes_root!s}, {opencode_root!s})"
+        f"{antigravity_root!s}, {qwen_root!s}, {hermes_root!s}, {opencode_root!s}, "
+        f"{goose_root!s})"
     )
 
 

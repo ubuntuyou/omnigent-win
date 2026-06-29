@@ -37,6 +37,8 @@ from pathlib import Path
 
 import httpx
 
+from omnigent._platform import IS_WINDOWS
+
 _logger = logging.getLogger(__name__)
 
 #: Seconds between store polls. Goose flushes a ``messages`` row per agentic
@@ -80,10 +82,20 @@ def default_sessions_db() -> Path:
     """Return Goose's SQLite session store path for this process's HOME.
 
     Overridable via ``GOOSE_SESSIONS_DB`` (tests, non-standard installs).
+
+    On Windows, Goose resolves its data dir through the ``etcetera`` crate's
+    ``Block``/``goose`` app strategy, which maps to the Roaming AppData tree:
+    ``%APPDATA%\\Block\\goose\\data\\sessions\\sessions.db`` (vs. the XDG
+    ``~/.local/share/goose/...`` on POSIX). The ``GOOSE_SESSIONS_DB`` override is
+    the escape hatch if a given Goose build lands the store elsewhere — confirm
+    with ``goose info -v``.
     """
     override = os.environ.get("GOOSE_SESSIONS_DB", "").strip()
     if override:
         return Path(override)
+    if IS_WINDOWS:
+        appdata = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+        return Path(appdata) / "Block" / "goose" / "data" / "sessions" / "sessions.db"
     return Path.home() / ".local" / "share" / "goose" / "sessions" / "sessions.db"
 
 

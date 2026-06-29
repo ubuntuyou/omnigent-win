@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from omnigent._platform import stable_user_id
+from omnigent._platform import IS_WINDOWS, stable_user_id
 
 #: Env var carrying the bridge dir into the harness executor process.
 BRIDGE_DIR_ENV_VAR = "HARNESS_GOOSE_NATIVE_BRIDGE_DIR"
@@ -106,8 +106,18 @@ def write_tmux_target(
     socket_path: Path,
     tmux_target: str,
     pid: int | None = None,
+    input_host: str | None = None,
+    input_port: int | None = None,
+    input_token: str | None = None,
 ) -> None:
-    """Advertise the tmux socket + target for the running Goose terminal."""
+    """Advertise the tmux socket + target for the running Goose terminal.
+
+    On Windows there is no tmux socket: the runner stands up a loopback
+    injection server for the ConPTY and advertises its ``host/port/token``
+    here instead (the tmux fields stay as harmless placeholders). The
+    goose-native executor reads them via :func:`_inject_via_injection_server`
+    — the cross-process analogue of the tmux ``send-keys`` paste.
+    """
     _ensure_dir(bridge_dir)
     payload: dict[str, Any] = {
         "socket_path": str(socket_path),
@@ -116,6 +126,10 @@ def write_tmux_target(
     }
     if pid is not None:
         payload["pid"] = pid
+    if input_host is not None and input_port is not None and input_token is not None:
+        payload["input_host"] = input_host
+        payload["input_port"] = input_port
+        payload["input_token"] = input_token
     tmp = bridge_dir / (_TMUX_FILE + ".tmp")
     tmp.write_text(json.dumps(payload), encoding="utf-8")
     os.replace(tmp, bridge_dir / _TMUX_FILE)
@@ -280,6 +294,18 @@ def inject_user_message(
     """
     if not content:
         raise RuntimeError("goose-native injection requires non-empty content")
+    if IS_WINDOWS:
+        # ConPTY backend: no tmux. Inject cross-process via the runner's loopback
+        # injection server (readiness gating + the bracketed-paste write happen on
+        # the runner side, which owns the ConPTY). Reuses the single Windows
+        # injection client in claude_native_bridge so the socket-framing logic has
+        # one home (per the fork's "fork-only files own new behavior" invariant).
+        from omnigent.claude_native_bridge import _inject_via_injection_server
+
+        _inject_via_injection_server(
+            bridge_dir, kind="message", content=content, timeout_s=timeout_s
+        )
+        return
     info = _wait_for_tmux_info(bridge_dir, timeout_s=timeout_s)
     socket_path = info["socket_path"]
     tmux_target = info["tmux_target"]
@@ -337,6 +363,13 @@ def inject_interrupt(bridge_dir: Path, *, timeout_s: float = _TMUX_READY_TIMEOUT
 
     :raises RuntimeError: If the tmux target is not advertised or send-keys fails.
     """
+    if IS_WINDOWS:
+        from omnigent.claude_native_bridge import _inject_via_injection_server
+
+        _inject_via_injection_server(
+            bridge_dir, kind="interrupt", content=None, timeout_s=timeout_s
+        )
+        return
     info = _wait_for_tmux_info(bridge_dir, timeout_s=timeout_s)
     # No ``-l``: tmux must interpret ``Escape`` as a key name.
     _run_tmux(info["socket_path"], "send-keys", "-t", info["tmux_target"], "Escape")
