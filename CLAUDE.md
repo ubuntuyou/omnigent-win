@@ -9,9 +9,10 @@ adds a parallel **ConPTY backend** (via [`pywinpty`](https://pypi.org/project/py
 so native agent harnesses run on **Windows 11**, streamed to the Omnigent web UI.
 
 **Working native harnesses on Windows:** **Claude Code** (`claude`), **OpenCode**
-(`opencode`), **Pi** (`pi`), and **Codex** (`codex`). The remaining tmux-only ones
-(cursor / goose / qwen / kimi / hermes / kiro / antigravity) still need the port —
-the `diagnose-windows-native-harness` skill walks the recurring failure chain.
+(`opencode`), **Pi** (`pi`), **Codex** (`codex`), and **Goose** (`goose`). The remaining
+tmux-only ones (cursor / qwen / kimi / hermes / kiro / antigravity) still need the port —
+the `diagnose-windows-native-harness` skill walks the recurring failure chain. (Pi needed
+no port — its injection is file/RPC-based, not tmux; see the Pi gotcha below.)
 
 Every change is **purely additive and `IS_WINDOWS`-guarded** — the POSIX/tmux path is
 untouched. See `ARCHITECTURE.md` for the data-flow detail and `architecture.mmd` for
@@ -131,6 +132,34 @@ the diagram.
   bypasses the shim's re-parse. **Repro trap:** testing with the vendored `codex.exe` path by hand passes
   (no shim), so a manual smoke test gives a false green — the bug only appears through `which`→`.CMD`. This is
   separate from the 0.139 pin: both had to be fixed for codex-native to launch.
+- **Goose on Windows: a TUI-mirror harness like Claude, plus two platform branches.**
+  Goose ships a real Rust `goose.exe` (no `.CMD` shim, no `%TEMP%` extraction), is
+  provider-agnostic, and owns its own auth — the user runs `goose configure` once (e.g.
+  Ollama Cloud → host `https://ollama.com` + key). Omnigent writes **no** Goose config.
+  (1) **Seeding gap (platform-independent).** Goose is a first-class native agent in
+  `native_coding_agents.py` but was never seeded into the agent DB at startup, so it was
+  absent from the new-session picker on *every* platform. `_ensure_default_goose_agent` in
+  `omnigent/server/app.py` now seeds it (mirrors cursor). Hermes still has this gap.
+  (2) **Injection.** Like Claude, web-chat turns reach the TUI by injection, not a server
+  transport. On Windows `goose_native_bridge.inject_user_message`/`inject_interrupt` route
+  through the runner's loopback injection server (reusing the single client in
+  `claude_native_bridge`) instead of tmux `send-keys`; `_auto_create_goose_terminal`
+  stands up `ensure_injection_server` and advertises `host/port/token` in `tmux.json`.
+  (3) **Transcript store path.** The forwarder tails Goose's SQLite `sessions.db`. On
+  Windows that lives at `%APPDATA%\Block\goose\data\sessions\sessions.db` (etcetera
+  `Block`/`goose` strategy → Roaming AppData), not the POSIX `~/.local/share/goose/...`;
+  `default_sessions_db` branches on `IS_WINDOWS` (override: `GOOSE_SESSIONS_DB` — confirm
+  with `goose info -v`). (4) **Approval mirror is deferred on Windows.** Goose runs
+  `GOOSE_MODE=smart_approve`; approve/deny tool calls **in the embedded terminal view**.
+  Web approval cards need a raw-keystroke injection kind (the cliclack selector is driven
+  with arrow keys) — a follow-up, see `goose_native_permissions.py`.
+- **Pi on Windows needs no dedicated port.** pi-native injects web turns through Pi's own
+  file/RPC extension (the `omnigent_pi_native_extension.js` channel), **not** tmux
+  `send-keys` — so once the harness-agnostic ConPTY terminal exists, pi-native runs on
+  Windows unchanged. There is no `pi_native_bridge.py` `IS_WINDOWS` branch to add, and no
+  Pi-specific Windows commit; "Pi works on Windows" is true precisely because the injection
+  path was never tmux-coupled. (Contrast goose/cursor/claude, which simulate keystrokes and
+  therefore each needed the injection-server branch.)
 
 ## Pointers — where things live
 
@@ -146,11 +175,16 @@ the diagram.
 | Windows unit tests | `tests/inner/test_terminal_windows.py` |
 | OpenCode Windows env (SystemRoot + writable TEMP) | `omnigent/opencode_native_app_server.py` (`filtered_server_env`, `opencode_terminal_env`, `_opencode_windows_tempdir`) |
 | OpenCode attach-TUI launch | `omnigent/runner/app.py` (`_auto_create_opencode_terminal`) |
-| Codex spawn env (SystemRoot) + Windows http_headers auth | `omnigent/inner/codex_executor.py` (`_clean_codex_env`, `_provider_codex_config_overrides`) |
+| Codex spawn env (SystemRoot) + Windows http_headers auth | `omnigent/inner/codex_executor.py` (`_clean_codex_env`, `_provider_codex_config_overrides`, `_find_codex_cli`) |
 | Codex provider routing (static-key bearer threading) | `omnigent/codex_native_app_server.py` (`_codex_provider_launch`, `resolve_native_codex_launch`) |
 | Codex readiness gate (configured-provider on Windows) | `omnigent/codex_native.py` (`_codex_auth_unavailable_reason`, `_codex_configured_provider_routes`) |
 | Codex provider config (Ollama Cloud) | `~/.omnigent/config.yaml` `providers:` (`kind: key`, `openai`, `wire_api: responses`) |
-| Codex Windows unit tests | `tests/test_native_codex_provider.py`, `tests/test_codex_native.py` |
+| Codex Windows unit tests | `tests/test_native_codex_provider.py`, `tests/test_codex_native.py`, `tests/inner/test_codex_executor.py` |
+| Goose picker seeding | `omnigent/server/app.py` (`_ensure_default_goose_agent`, `_build_goose_native_bundle`) |
+| Goose injection (Windows branch) + injection advertise | `omnigent/goose_native_bridge.py` (`inject_user_message`, `inject_interrupt`, `write_tmux_target`) |
+| Goose terminal auto-create + injection server | `omnigent/runner/app.py` (`_auto_create_goose_terminal`) |
+| Goose transcript forwarder + Windows SQLite path | `omnigent/goose_native_forwarder.py` (`default_sessions_db`) |
+| Goose Windows unit tests | `tests/test_goose_native_bridge.py`, `tests/test_goose_native_forwarder.py` |
 
 ## Verifying a change
 

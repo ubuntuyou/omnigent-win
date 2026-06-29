@@ -170,7 +170,46 @@ Two Windows-specific facts shape the fork's behavior:
   (This was originally misdiagnosed as an unfixable upstream limitation — every "broken"
   repro had run under a sandbox `TEMP=C:\WINDOWS\temp`.)
 
-## 4.9 Codex native on Windows (via an OpenAI-compatible provider)
+## 4.9 Goose native on Windows (TUI-mirror, like Claude)
+
+Goose is a **TUI-mirror** harness — the same shape as claude-native, not the
+server-transport shape of opencode. The runner launches `goose session` in a ConPTY,
+mirrors its conversation into the chat view, and injects web turns into the same pane.
+Three pieces make it work on Windows; each is additive and `IS_WINDOWS`-guarded.
+
+- **Injection (no tmux).** On POSIX `goose_native_bridge.inject_user_message` /
+  `inject_interrupt` shell out to tmux `send-keys`. On Windows they route through the
+  runner's loopback **injection server** — the cross-process channel the runner owns for
+  the in-process ConPTY — by reusing the single client in `claude_native_bridge`
+  (`_inject_via_injection_server`), so the socket-framing logic has one home. The runner's
+  `_auto_create_goose_terminal` stands up `ensure_injection_server(instance)` and
+  advertises its `host`/`port`/`token` into the bridge's `tmux.json`; `write_tmux_target`
+  gained those optional fields. The injection server's readiness gate keys on the
+  bracketed-paste enable (`\x1b[?2004h`), which Goose's TUI emits like Claude's — worst
+  case is a best-effort inject at the deadline, never a silent drop.
+
+- **Transcript forwarder + Windows store path.** `goose_native_forwarder` tails Goose's
+  SQLite `sessions.db` (discovery by the launch-unique `--name`, idempotent high-water
+  cursor). The store path differs by OS: Goose resolves its data dir via the `etcetera`
+  `Block`/`goose` app strategy, which on Windows is Roaming AppData —
+  `%APPDATA%\Block\goose\data\sessions\sessions.db` — versus the POSIX XDG
+  `~/.local/share/goose/sessions/sessions.db`. `default_sessions_db` branches on
+  `IS_WINDOWS`; `GOOSE_SESSIONS_DB` overrides for non-standard installs (confirm with
+  `goose info -v`). Everything else in the forwarder is platform-agnostic.
+
+- **Picker seeding (platform-independent prerequisite).** Goose is a first-class native
+  agent in code but was never seeded into the agent DB at startup, so it was invisible in
+  the new-session picker on *every* platform. `_ensure_default_goose_agent`
+  (`omnigent/server/app.py`, mirroring cursor) fixes that. Provider/auth is Goose's own
+  (`goose configure`); Omnigent writes no Goose config.
+
+**Deferred:** web tool-approval cards. Goose runs `GOOSE_MODE=smart_approve` and prompts
+in its TUI (mirrored into the embedded terminal view, where the user approves). Surfacing
+that as a web elicitation needs a raw-keystroke injection kind — the cliclack selector is
+driven with arrow keys, which the current `message`/`interrupt` injection protocol can't
+express. See `goose_native_permissions.py`.
+
+## 4.10 Codex native on Windows (via an OpenAI-compatible provider)
 
 The codex-native harness is a **server transport** like opencode, not a TUI mirror:
 the runner spawns `codex app-server --listen ws://127.0.0.1:<port>` (JSON-RPC over a
@@ -209,6 +248,17 @@ The CLI is **pinned to `0.139.0`**: codex 0.142 removed `app-server --listen` (s
 which would break the loopback-WebSocket transport. Custom provider IDs can't be named
 `ollama` (reserved built-in = local Ollama); omnigent uses `omnigent_provider`.
 
+## 4.11 Pi native on Windows (no port required)
+
+Pi is a **TUI-mirror** harness, but unlike claude/goose/cursor it never simulated
+keystrokes: pi-native injects web turns through Pi's own **file/RPC extension**
+(`omnigent/resources/pi_native/omnigent_pi_native_extension.js`), not tmux `send-keys`.
+That injection path is already cross-platform, so once the harness-agnostic ConPTY
+terminal exists (§4.1), pi-native runs on Windows **unchanged** — there is no
+`pi_native_bridge.py` `IS_WINDOWS` branch and no Pi-specific Windows commit. This is the
+payoff of a file-based transport over keystroke simulation: nothing to port. (The chat
+view is fed by Pi's session store the same way on every OS.)
+
 ## 5. Alignment with upstream — merge surface
 
 The fork stays mergeable with upstream because almost everything is additive:
@@ -225,10 +275,13 @@ The fork stays mergeable with upstream because almost everything is additive:
 
 ## 6. Known limitations (Windows path)
 
-- **Working native harnesses: Claude Code, OpenCode, Pi, Codex.** All four have chat
-  **and** terminal views on Windows (opencode needs the `%TEMP%` fix in §4.8; codex needs
-  the provider/auth/exe wiring in §4.9). The remaining native harnesses (Cursor, Goose,
-  Qwen, Kimi, Hermes, Kiro, Antigravity) still require tmux and are untested on Windows.
+- **Working native harnesses: Claude Code, OpenCode, Pi, Codex, Goose.** All five have
+  chat **and** terminal views on Windows. Claude (§4.3–4.7), Goose (§4.9), and Pi (§4.11)
+  are TUI-mirror harnesses; OpenCode (§4.8) and Codex (§4.10) are server transports.
+  OpenCode needs the `%TEMP%` fix (§4.8); Codex needs the provider/auth/exe wiring (§4.10);
+  Pi needed no port (§4.11). The remaining tmux-only harnesses (Cursor, Qwen, Kimi, Hermes,
+  Kiro, Antigravity) still require tmux and are untested on Windows. Goose's web
+  tool-approval cards are deferred (§4.9).
 - The browser **Files** panel and terminal-list resource endpoints return `502` on
   Windows (resource proxy not wired up there yet); chat and terminal views are
   unaffected.

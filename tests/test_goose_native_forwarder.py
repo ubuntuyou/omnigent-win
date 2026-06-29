@@ -110,3 +110,33 @@ def test_default_sessions_db_honors_override(monkeypatch) -> None:
     assert f.default_sessions_db() == Path("/custom/sessions.db")
     monkeypatch.delenv("GOOSE_SESSIONS_DB", raising=False)
     assert f.default_sessions_db().name == "sessions.db"
+
+
+def test_default_sessions_db_windows_uses_appdata(monkeypatch) -> None:
+    """On Windows the store lives under %APPDATA%\\Block\\goose\\data, not XDG.
+
+    Goose resolves its data dir via the ``etcetera`` ``Block``/``goose`` app
+    strategy, which maps to Roaming AppData on Windows. Without this branch the
+    forwarder polls the POSIX ``~/.local/share`` path and the chat view stays
+    silently empty.
+    """
+    monkeypatch.delenv("GOOSE_SESSIONS_DB", raising=False)
+    monkeypatch.setattr(f, "IS_WINDOWS", True)
+    monkeypatch.setenv("APPDATA", r"C:\Users\tester\AppData\Roaming")
+    db = f.default_sessions_db()
+    assert db == (
+        Path(r"C:\Users\tester\AppData\Roaming")
+        / "Block"
+        / "goose"
+        / "data"
+        / "sessions"
+        / "sessions.db"
+    )
+
+
+def test_default_sessions_db_posix_uses_xdg(monkeypatch) -> None:
+    """POSIX keeps the upstream XDG path, untouched by the Windows branch."""
+    monkeypatch.delenv("GOOSE_SESSIONS_DB", raising=False)
+    monkeypatch.setattr(f, "IS_WINDOWS", False)
+    db = f.default_sessions_db()
+    assert db.parts[-4:] == ("share", "goose", "sessions", "sessions.db")

@@ -4,11 +4,11 @@
 for a failed native-terminal auto-create. On Windows the message must
 distinguish:
 
-- harnesses ported to the ConPTY backend (claude / codex / pi / opencode):
-  a start failure is a *real* error → "see runner logs" (the ConPTY itself
-  works, so "not supported on Windows" would send the user chasing a
+- harnesses ported to the ConPTY backend (claude / codex / pi / opencode /
+  goose): a start failure is a *real* error → "see runner logs" (the ConPTY
+  itself works, so "not supported on Windows" would send the user chasing a
   non-existent platform limitation);
-- still-tmux-only harnesses (cursor / goose / qwen / ...): genuinely
+- still-tmux-only harnesses (cursor / qwen / kimi / ...): genuinely
   unsupported → keep the actionable "not supported on Windows" message.
 
 The raw cause is always logged for operators, never surfaced to the client.
@@ -26,6 +26,14 @@ from omnigent.runner.app import (
 def test_windows_ported_harness_points_at_runner_logs(monkeypatch):
     monkeypatch.setattr(app_mod, "IS_WINDOWS", True)
     payload = _native_terminal_start_error_payload(RuntimeError("boom"), "Codex")
+    assert payload["code"] == _NATIVE_TERMINAL_START_FAILED_CODE
+    assert "not supported on Windows" not in payload["message"]
+    assert "runner logs" in payload["message"]
+
+
+def test_windows_goose_points_at_runner_logs(monkeypatch):
+    monkeypatch.setattr(app_mod, "IS_WINDOWS", True)
+    payload = _native_terminal_start_error_payload(RuntimeError("boom"), "Goose")
     assert payload["code"] == _NATIVE_TERMINAL_START_FAILED_CODE
     assert "not supported on Windows" not in payload["message"]
     assert "runner logs" in payload["message"]
