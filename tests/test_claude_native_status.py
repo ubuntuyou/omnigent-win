@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 import json
 import subprocess
 import sys
@@ -11,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from omnigent import claude_native_status
+from tests.native_hook_helpers import fake_stdin
 
 
 def _run(
@@ -32,7 +32,7 @@ def _run(
     :returns: Process exit code from ``main()``.
     """
     del capsys
-    monkeypatch.setattr(sys, "stdin", io.StringIO(stdin_payload))
+    monkeypatch.setattr(sys, "stdin", fake_stdin(stdin_payload))
     argv = ["--bridge-dir", str(bridge_dir)]
     if chain is not None:
         argv.extend(["--chain", chain])

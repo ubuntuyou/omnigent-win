@@ -7,7 +7,32 @@ lives in one place and can't drift if new modes are added.
 
 from __future__ import annotations
 
+import io
+
 import httpx
+
+
+class _FakeStdin:
+    """A ``sys.stdin`` stand-in exposing a UTF-8 ``.buffer``.
+
+    The native hooks read ``sys.stdin.buffer.read().decode("utf-8")`` (fork
+    invariant: decode stdin as UTF-8, never the Windows locale code page), so a
+    bare ``io.StringIO`` — which has no ``.buffer`` — raises ``AttributeError``.
+    This mirrors the real stdin: a text stream whose ``.buffer`` yields the raw
+    UTF-8 bytes.
+    """
+
+    def __init__(self, text: str) -> None:
+        self.buffer = io.BytesIO(text.encode("utf-8"))
+
+
+def fake_stdin(text: str) -> _FakeStdin:
+    """Build a stdin stub the native hooks can read via ``sys.stdin.buffer``.
+
+    :param text: The stdin payload the hook will read, e.g. a JSON string.
+    :returns: An object usable as a drop-in for ``sys.stdin`` in the hooks.
+    """
+    return _FakeStdin(text)
 
 
 def make_failing_client(mode: str) -> type:
