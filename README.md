@@ -4,38 +4,47 @@
 > Upstream's native terminal harnesses run the agent CLI inside **tmux**, which is
 > POSIX-only — so on Windows the terminal layer raises *"not supported."* This fork
 > adds a parallel **ConPTY backend** (via [`pywinpty`](https://pypi.org/project/pywinpty/))
-> so the **Claude Code** (`claude`) native harness runs on **Windows 11**, streamed to
-> the Omnigent web UI. The change is **purely additive** — the POSIX tmux path is
-> untouched — and is scoped to Claude Code.
+> so native agent harnesses run on **Windows 11**, streamed to the Omnigent web UI.
+> Every change is **purely additive and `IS_WINDOWS`-guarded** — the POSIX tmux path is
+> byte-for-byte untouched.
 >
-> ### What works
-> - `claude` launches in a real ConPTY and its TUI streams live to the browser terminal view.
+> ### Working native harnesses
+> - **Claude Code** (`claude`), **OpenCode** (`opencode`), and **Goose** (`goose`) each
+>   launch in a real ConPTY and stream live to the browser terminal view, with web-chat
+>   messages injected into the same pane.
+> - Two transports are covered: **TUI-mirror** harnesses (Claude, Goose — the runner
+>   drives the CLI's own TUI and tails its transcript into the chat view) and
+>   **server-transport** harnesses (OpenCode — `opencode serve` over REST/SSE).
+> - **Codex** (`codex`) and **Pi** (`pi`) are ported on in-flight branches; the
+>   remaining tmux-only harnesses (Cursor, Qwen, Kimi, Hermes, Kiro, Antigravity) still
+>   need the port.
 > - The **first message of a fresh conversation injects and submits reliably** — a
 >   boot-time hook race that used to drop the auto-submit is handled by a quiet-gated
 >   resend, verified end-to-end through the web UI.
-> - Cross-process web-chat message injection, readiness gating, and pane resize.
 >
 > ### Known limitations
-> - **Claude Code only.** Other native harnesses (Codex, Cursor, Goose, Qwen) still
->   require tmux/POSIX and are untested on Windows.
 > - The browser **Files** panel and terminal-list resource endpoints currently return
 >   `502` on Windows (the runner's resource proxy isn't wired up there yet); the chat
 >   and terminal views are unaffected.
 > - The backend exposes **best-effort raw output**, not a `pyte`-rendered screen
->   (tmux `capture-pane` parity is out of scope). Claude turn-completion is
->   hook/transcript-driven, so this is fine for the web flow.
-> - `keep_alive_after_exit` (tmux `remain-on-exit`) is not emulated — when `claude`
+>   (tmux `capture-pane` parity is out of scope). Turn-completion is hook/transcript-
+>   driven, so this is fine for the web flow.
+> - `keep_alive_after_exit` (tmux `remain-on-exit`) is not emulated — when the agent CLI
 >   exits, the ConPTY closes.
-> - Interaction is via the **browser** terminal view; local `omnigent claude` TTY
+> - Interaction is via the **browser** terminal view; local `omnigent <harness>` TTY
 >   attach in your own PowerShell window is not covered.
+> - **Goose** tool-approval prompts are answered in the embedded terminal view; web
+>   approval cards are a follow-up.
 >
 > ### Prerequisites & install
-> - Windows 11, Python 3.12+, and the **`claude` CLI installed and on `PATH`**.
+> - Windows 11, Python 3.12+, and the **CLI for the harness you want on `PATH`**
+>   (`claude`, `opencode`, or `goose` — each owns its own login/auth; Goose is a single
+>   `goose.exe`, Claude/OpenCode install via npm).
 > - `uv sync` pulls in `pywinpty` automatically on Windows — the only added dependency
 >   (Windows-only, no transitive deps). On POSIX the dependency set is byte-for-byte
 >   identical to upstream.
 > - Then follow upstream's setup below (`omnigent server start`, open the web UI, add a
->   Claude Code agent).
+>   native agent — e.g. Claude Code, OpenCode, or Goose).
 >
 > _Everything below is upstream Omnigent's original README._
 
