@@ -9,15 +9,16 @@
 > byte-for-byte untouched.
 >
 > ### Working native harnesses
-> - **Claude Code** (`claude`), **OpenCode** (`opencode`), and **Goose** (`goose`) each
->   launch in a real ConPTY and stream live to the browser terminal view, with web-chat
->   messages injected into the same pane.
-> - Two transports are covered: **TUI-mirror** harnesses (Claude, Goose — the runner
->   drives the CLI's own TUI and tails its transcript into the chat view) and
->   **server-transport** harnesses (OpenCode — `opencode serve` over REST/SSE).
-> - **Codex** (`codex`) and **Pi** (`pi`) are ported on in-flight branches; the
->   remaining tmux-only harnesses (Cursor, Qwen, Kimi, Hermes, Kiro, Antigravity) still
->   need the port.
+> - **Claude Code** (`claude`), **OpenCode** (`opencode`), **Pi** (`pi`), **Codex**
+>   (`codex`), and **Goose** (`goose`) each launch in a real ConPTY and stream live to
+>   the browser terminal view, with web-chat messages injected into the same pane.
+> - Two transports are covered: **TUI-mirror** harnesses (Claude, Goose, Pi — the runner
+>   drives the CLI's own TUI and feeds the chat view from its transcript) and
+>   **server-transport** harnesses (OpenCode — `opencode serve` over REST/SSE; Codex —
+>   `codex app-server` over a loopback WebSocket).
+> - Pi needed **no Windows-specific port** — its injection is file/RPC-based, not tmux —
+>   so it runs on the shared ConPTY backend unchanged. The remaining tmux-only harnesses
+>   (Cursor, Qwen, Kimi, Hermes, Kiro, Antigravity) still need the port.
 > - The **first message of a fresh conversation injects and submits reliably** — a
 >   boot-time hook race that used to drop the auto-submit is handled by a quiet-gated
 >   resend, verified end-to-end through the web UI.
@@ -38,13 +39,14 @@
 >
 > ### Prerequisites & install
 > - Windows 11, Python 3.12+, and the **CLI for the harness you want on `PATH`**
->   (`claude`, `opencode`, or `goose` — each owns its own login/auth; Goose is a single
->   `goose.exe`, Claude/OpenCode install via npm).
+>   (`claude`, `opencode`, `pi`, `codex`, or `goose` — each owns its own login/auth;
+>   Goose is a single `goose.exe`, Claude/OpenCode/Codex install via npm, and Codex is
+>   pinned to `@openai/codex@0.139.0`).
 > - `uv sync` pulls in `pywinpty` automatically on Windows — the only added dependency
 >   (Windows-only, no transitive deps). On POSIX the dependency set is byte-for-byte
 >   identical to upstream.
 > - Then follow upstream's setup below (`omnigent server start`, open the web UI, add a
->   native agent — e.g. Claude Code, OpenCode, or Goose).
+>   native agent — e.g. Claude Code, OpenCode, Pi, Codex, or Goose).
 >
 > _Everything below is upstream Omnigent's original README._
 
