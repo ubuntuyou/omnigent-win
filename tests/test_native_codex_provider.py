@@ -105,6 +105,86 @@ def test_provider_codex_overrides_omit_model_line_when_none() -> None:
     assert 'model_provider="omnigent_provider"' in joined
 
 
+def test_provider_codex_overrides_windows_uses_http_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On Windows a static key is carried as an inline ``http_headers`` bearer.
+
+    A Windows codex child has no POSIX ``sh``/``printf`` to run an
+    ``auth.command``, so the override must instead set the Authorization header
+    inline. Failure (the ``auth={command="sh",...}`` form) means a Windows
+    native Codex launch authenticates with a command it cannot execute and 401s.
+    """
+    import omnigent.inner.codex_executor as ce
+
+    monkeypatch.setattr(ce, "IS_WINDOWS", True)
+    overrides = ce._provider_codex_config_overrides(
+        model="glm-5.2",
+        base_url="https://ollama.com/v1",
+        auth_command="printf %s sk-secret",
+        wire_api="responses",
+        bearer_token="sk-secret",
+    )
+    joined = "\n".join(overrides)
+    assert 'http_headers={Authorization="Bearer sk-secret"}' in joined
+    assert 'auth={command="sh"' not in joined  # no POSIX shell auth command
+    assert "printf" not in joined
+    assert 'wire_api="responses"' in joined
+    assert 'base_url="https://ollama.com/v1"' in joined
+
+
+def test_provider_codex_overrides_posix_ignores_bearer_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On POSIX the ``bearer_token`` is ignored — the sh auth command is kept.
+
+    The Windows http_headers form is strictly additive; POSIX output must be
+    byte-for-byte the same whether or not a ``bearer_token`` is supplied.
+    """
+    import omnigent.inner.codex_executor as ce
+
+    monkeypatch.setattr(ce, "IS_WINDOWS", False)
+    overrides = ce._provider_codex_config_overrides(
+        model="glm-5.2",
+        base_url="https://ollama.com/v1",
+        auth_command="printf %s sk-secret",
+        wire_api="responses",
+        bearer_token="sk-secret",
+    )
+    joined = "\n".join(overrides)
+    assert "printf %s sk-secret" in joined  # sh auth command path unchanged
+    assert "http_headers" not in joined
+
+
+def test_codex_configured_provider_routes_true_for_key_openai(_isolated: Path) -> None:
+    """A configured ``key`` provider serving ``openai`` is routable for Codex."""
+    from omnigent.codex_native import _codex_configured_provider_routes
+
+    _seed(
+        _isolated,
+        {
+            "ollama-cloud": {
+                "kind": "key",
+                "default": True,
+                "openai": {
+                    "base_url": "https://ollama.com/v1",
+                    "api_key": "sk-test",
+                    "wire_api": "responses",
+                    "models": {"default": "glm-5.2"},
+                },
+            }
+        },
+    )
+    assert _codex_configured_provider_routes() is True
+
+
+def test_codex_configured_provider_routes_false_when_unconfigured(_isolated: Path) -> None:
+    """With no provider configured, Codex has nothing to route through."""
+    from omnigent.codex_native import _codex_configured_provider_routes
+
+    assert _codex_configured_provider_routes() is False
+
+
 def test_resolve_native_codex_launch_key_default_routes_via_overrides(
     _isolated: Path,
 ) -> None:

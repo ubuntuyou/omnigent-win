@@ -4,11 +4,13 @@
 %%
 %% The graph below is the claude-native canonical flow. The other working Windows
 %% harnesses share the TERMINAL-VIEW half (ConPTY → ws_bridge) and feed the CHAT
-%% VIEW via a different source than claude's JSONL transcript forwarder:
+%% VIEW from a different source than claude's JSONL transcript forwarder:
 %%   - goose:    SQLite-tail forwarder over Goose's sessions.db   (ARCHITECTURE.md §4.9)
 %%   - opencode: `opencode serve` REST + SSE                      (ARCHITECTURE.md §4.8)
-%% Goose, like claude, is a TUI-mirror harness — same injection-server input path;
-%% only the chat-view source differs. See the "altchat" note in the diagram.
+%%   - codex:    `codex app-server --listen ws://…` JSON-RPC      (ARCHITECTURE.md §4.10)
+%%   - pi:       file/RPC extension — no port needed              (ARCHITECTURE.md §4.11)
+%% Claude, goose, and pi are TUI-mirror harnesses (same injection-server input path);
+%% opencode and codex are server transports. See the "altchat" note in the diagram.
 
 flowchart TB
     subgraph browser["Browser (web UI)"]
@@ -64,8 +66,8 @@ flowchart TB
     inj --> writeq
     writeq -->|literal keystrokes| claude
 
-    %% alternate chat-view sources for the other Windows harnesses (opencode / goose)
-    altchat["goose: SQLite-tail forwarder over sessions.db (TUI-mirror,<br/>same injection-server input path) · §4.9<br/>opencode: serve REST+SSE (server transport) · §4.8<br/>— each replaces the JSONL transcript forwarder for the CHAT VIEW"]
+    %% alternate chat-view sources for the other Windows harnesses
+    altchat["goose: SQLite-tail forwarder over sessions.db (TUI-mirror) · §4.9<br/>opencode: serve REST+SSE (server transport) · §4.8<br/>codex: app-server ws JSON-RPC (server transport) · §4.10<br/>— each replaces the JSONL transcript forwarder for the CHAT VIEW"]
     altchat -.->|external_conversation_item| persist
 
     classDef winfork fill:#cfe8ff,stroke:#3b82f6,color:#0b2942;

@@ -138,6 +138,41 @@ def test_codex_auth_unavailable_reason_malformed_auth_needs_auth(
     assert codex_native._codex_auth_unavailable_reason() == "needs-auth"
 
 
+def test_codex_auth_unavailable_reason_windows_provider_routes_available(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """On Windows, a configured routable provider satisfies the gate sans auth.json.
+
+    A Windows machine can route Codex through an ``omnigent setup`` provider
+    (e.g. Ollama Cloud) whose credential rides in the config — no ``auth.json``.
+    The gate must treat that as available so the picker is not stuck on
+    needs-auth despite a working route.
+    """
+    auth_path = tmp_path / "codex-home" / "auth.json"  # intentionally absent
+    _point_codex_auth_check_at(monkeypatch, auth_path, binary_present=True)
+    monkeypatch.setattr(codex_native, "IS_WINDOWS", True)
+    monkeypatch.setattr(codex_native, "_codex_configured_provider_routes", lambda: True)
+
+    assert codex_native._codex_auth_unavailable_reason() is None
+
+
+def test_codex_auth_unavailable_reason_posix_ignores_provider_routes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """On POSIX the provider-routes path is not consulted — auth.json still required.
+
+    The gate extension is Windows-only (additive); POSIX readiness must be
+    byte-for-byte unchanged, so a configured provider without auth.json still
+    reports needs-auth there.
+    """
+    auth_path = tmp_path / "codex-home" / "auth.json"  # intentionally absent
+    _point_codex_auth_check_at(monkeypatch, auth_path, binary_present=True)
+    monkeypatch.setattr(codex_native, "IS_WINDOWS", False)
+    monkeypatch.setattr(codex_native, "_codex_configured_provider_routes", lambda: True)
+
+    assert codex_native._codex_auth_unavailable_reason() == "needs-auth"
+
+
 class _FakeTerminalClient:
     """
     Minimal async client for terminal-launch helper tests.

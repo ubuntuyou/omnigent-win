@@ -2781,3 +2781,75 @@ def test_codex_skill_sources_omits_absent_dirs(tmp_path: Path) -> None:
     (home / ".codex" / "skills").mkdir(parents=True)
     assert codex_skill_sources(None, home) == [home / ".codex" / "skills"]
     assert codex_skill_sources(tmp_path / "no-bundle", home) == [home / ".codex" / "skills"]
+
+
+def _make_npm_codex_layout(prefix: Path, *, with_exe: bool = True) -> Path:
+    """Build a minimal npm global layout: a codex.CMD shim + vendored exe.
+
+    Mirrors the real `@openai/codex` Windows install so `_find_codex_cli`
+    resolution can be exercised without a real install.
+    """
+    (prefix / "codex.CMD").write_text("@echo off\n", encoding="utf-8")
+    if with_exe:
+        exe_dir = (
+            prefix
+            / "node_modules"
+            / "@openai"
+            / "codex"
+            / "node_modules"
+            / "@openai"
+            / "codex-win32-x64"
+            / "vendor"
+            / "x86_64-pc-windows-msvc"
+            / "bin"
+        )
+        exe_dir.mkdir(parents=True)
+        (exe_dir / "codex.exe").write_text("", encoding="utf-8")
+    return prefix / "codex.CMD"
+
+
+def test_find_codex_cli_windows_resolves_exe_behind_cmd_shim(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """On Windows, `which` -> codex.CMD must resolve to the vendored codex.exe.
+
+    The npm .CMD shim re-parses args through cmd.exe `%*`, mangling quoted `-c`
+    overrides so the app-server exits with a top-level usage error. Resolving
+    the real .exe bypasses the shim. Failure here means native Codex launches
+    against the shim and dies on the provider/MCP overrides.
+    """
+    import omnigent.inner.codex_executor as ce
+
+    shim = _make_npm_codex_layout(tmp_path)
+    monkeypatch.setattr(ce, "IS_WINDOWS", True)
+    monkeypatch.setattr(ce.shutil, "which", lambda name: str(shim))
+
+    resolved = ce._find_codex_cli()
+    assert resolved is not None
+    assert resolved.lower().endswith("codex.exe")
+    assert Path(resolved).is_file()
+
+
+def test_find_codex_cli_windows_falls_back_to_shim_when_no_exe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """When the vendored exe is absent, fall back to the shim (don't return None)."""
+    import omnigent.inner.codex_executor as ce
+
+    shim = _make_npm_codex_layout(tmp_path, with_exe=False)
+    monkeypatch.setattr(ce, "IS_WINDOWS", True)
+    monkeypatch.setattr(ce.shutil, "which", lambda name: str(shim))
+
+    assert ce._find_codex_cli() == str(shim)
+
+
+def test_find_codex_cli_posix_returns_which_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On POSIX the resolver is a pass-through to shutil.which (additive guard)."""
+    import omnigent.inner.codex_executor as ce
+
+    monkeypatch.setattr(ce, "IS_WINDOWS", False)
+    monkeypatch.setattr(ce.shutil, "which", lambda name: "/usr/local/bin/codex")
+
+    assert ce._find_codex_cli() == "/usr/local/bin/codex"

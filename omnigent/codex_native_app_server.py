@@ -1387,10 +1387,14 @@ def _codex_provider_launch(entry: ProviderEntry, model: str | None) -> NativeCod
         return None
     if family is None:
         return None
+    bearer_token: str | None = None
     if family.auth_command:
         auth_command = family.auth_command
     elif family.api_key:
         auth_command = f"printf %s {shlex.quote(family.api_key)}"
+        # Static key → on Windows it is carried as an inline bearer header
+        # (no POSIX sh/printf on the codex child); POSIX ignores this.
+        bearer_token = family.api_key
     else:
         # Serves openai but carries no usable credential.
         return None
@@ -1400,6 +1404,7 @@ def _codex_provider_launch(entry: ProviderEntry, model: str | None) -> NativeCod
         base_url=family.base_url,
         auth_command=auth_command,
         wire_api=family.wire_api or "responses",
+        bearer_token=bearer_token,
     )
     return NativeCodexLaunch(config_overrides=overrides, model=pinned, profile=None)
 

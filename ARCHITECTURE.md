@@ -209,6 +209,56 @@ that as a web elicitation needs a raw-keystroke injection kind — the cliclack 
 driven with arrow keys, which the current `message`/`interrupt` injection protocol can't
 express. See `goose_native_permissions.py`.
 
+## 4.10 Codex native on Windows (via an OpenAI-compatible provider)
+
+The codex-native harness is a **server transport** like opencode, not a TUI mirror:
+the runner spawns `codex app-server --listen ws://127.0.0.1:<port>` (JSON-RPC over a
+loopback WebSocket), drives turns over that socket, and rides a ConPTY for the terminal
+view. The defining Windows wrinkle is **auth**: Codex normally expects an OpenAI login,
+which the user doesn't have, so on Windows it routes through an omnigent **`key` provider**
+(Ollama Cloud) configured in `~/.omnigent/config.yaml`. Five facts shape the fork, all
+additive and `IS_WINDOWS`-guarded; the POSIX OpenAI-login path is untouched.
+
+- **Wire API.** codex ≥0.137 only speaks the **Responses** API (it hard-fails on
+  `wire_api="chat"`). Ollama Cloud implements `/v1/responses`, so the provider block sets
+  `wire_api: responses` — verified compatible, not assumed.
+
+- **Auth (the core additive change).** The POSIX provider override authenticates with
+  `auth={command="sh",args=["-c","printf …"]}` — but there is no `sh`/`printf` on a
+  Windows codex child. `_provider_codex_config_overrides` (`omnigent/inner/codex_executor.py`)
+  takes a `bearer_token` and, on Windows with a static key, emits an inline
+  `http_headers={Authorization="Bearer …"}` instead. `_codex_provider_launch`
+  (`omnigent/codex_native_app_server.py`) threads the configured key through as that bearer.
+
+- **Env.** `_clean_codex_env` adds `WINDOWS_ENV_PASSTHROUGH` (notably `SystemRoot`) to the
+  app-server child's allowlist, or it fast-fails with `0xC0000409` — the same Bun/Windows
+  startup trap as opencode (§4.8).
+
+- **Readiness gate.** `_codex_auth_unavailable_reason` (`omnigent/codex_native.py`) used to
+  gate solely on `auth.json`. On Windows it now also accepts a configured routable provider
+  (`_codex_configured_provider_routes`), so the harness picker unblocks with no OpenAI login.
+
+- **Spawning the real exe, not the shim.** `shutil.which("codex")` returns `codex.CMD`, a
+  batch shim that relaunches node with `%*`, re-parsing argv through `cmd.exe` and mangling
+  the `-c` provider/MCP overrides (embedded quotes + spaces get split → `unexpected argument`
+  → masked as "not supported on Windows"). `_find_codex_cli` resolves the vendored
+  `…/@openai/codex-win32-*/**/codex.exe` and spawns it directly, bypassing the re-parse.
+
+The CLI is **pinned to `0.139.0`**: codex 0.142 removed `app-server --listen` (stdio-only),
+which would break the loopback-WebSocket transport. Custom provider IDs can't be named
+`ollama` (reserved built-in = local Ollama); omnigent uses `omnigent_provider`.
+
+## 4.11 Pi native on Windows (no port required)
+
+Pi is a **TUI-mirror** harness, but unlike claude/goose/cursor it never simulated
+keystrokes: pi-native injects web turns through Pi's own **file/RPC extension**
+(`omnigent/resources/pi_native/omnigent_pi_native_extension.js`), not tmux `send-keys`.
+That injection path is already cross-platform, so once the harness-agnostic ConPTY
+terminal exists (§4.1), pi-native runs on Windows **unchanged** — there is no
+`pi_native_bridge.py` `IS_WINDOWS` branch and no Pi-specific Windows commit. This is the
+payoff of a file-based transport over keystroke simulation: nothing to port. (The chat
+view is fed by Pi's session store the same way on every OS.)
+
 ## 5. Alignment with upstream — merge surface
 
 The fork stays mergeable with upstream because almost everything is additive:
@@ -225,11 +275,13 @@ The fork stays mergeable with upstream because almost everything is additive:
 
 ## 6. Known limitations (Windows path)
 
-- **Claude Code, OpenCode, and Goose run on Windows.** Claude (§4.3–4.7) and Goose (§4.9)
-  are TUI-mirror harnesses with chat **and** terminal views; OpenCode (§4.8, server
-  transport) also has both (it needs the `%TEMP%` fix). Codex and Pi are ported on
-  in-flight branches; the remaining tmux-only harnesses (Cursor, Qwen, Kimi, Hermes, Kiro,
-  Antigravity) are not yet on Windows. Goose's web tool-approval cards are deferred (§4.9).
+- **Working native harnesses: Claude Code, OpenCode, Pi, Codex, Goose.** All five have
+  chat **and** terminal views on Windows. Claude (§4.3–4.7), Goose (§4.9), and Pi (§4.11)
+  are TUI-mirror harnesses; OpenCode (§4.8) and Codex (§4.10) are server transports.
+  OpenCode needs the `%TEMP%` fix (§4.8); Codex needs the provider/auth/exe wiring (§4.10);
+  Pi needed no port (§4.11). The remaining tmux-only harnesses (Cursor, Qwen, Kimi, Hermes,
+  Kiro, Antigravity) still require tmux and are untested on Windows. Goose's web
+  tool-approval cards are deferred (§4.9).
 - The browser **Files** panel and terminal-list resource endpoints return `502` on
   Windows (resource proxy not wired up there yet); chat and terminal views are
   unaffected.
