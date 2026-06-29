@@ -119,6 +119,18 @@ the diagram.
   Pin: `npm install -g @openai/codex@0.139.0` (the `.github/ci-deps/package.json` pin omnigent is
   validated against). Until omnigent's transport is ported to codex's new stdio app-server, stay
   on 0.139.x.
+- **Codex must be spawned via the vendored `codex.exe`, NOT the npm `codex.CMD` shim.** `shutil.which("codex")`
+  on Windows returns `codex.CMD`, a batch wrapper that relaunches node with `%*` — re-parsing argv through
+  `cmd.exe`. That **mangles `-c` override values containing embedded quotes + spaces**: the app-server passes
+  the provider block (`model_providers.X={name="Omnigent Provider",…}`) and the MCP `args=["-m","omnigent…"]`
+  as `-c` fragments, so codex sees a split token (`Provider",base_url=…`) → `error: unexpected argument` →
+  exits with the **top-level** usage block (`Usage: codex [OPTIONS] [PROMPT]`, *not* the app-server usage) →
+  masked by the runner as `native_terminal_start_failed` *"not supported on Windows"*. `_find_codex_cli`
+  (`IS_WINDOWS`-guarded) resolves the real exe under
+  `…/node_modules/@openai/codex/node_modules/@openai/codex-win32-*/**/codex.exe`; spawning it directly
+  bypasses the shim's re-parse. **Repro trap:** testing with the vendored `codex.exe` path by hand passes
+  (no shim), so a manual smoke test gives a false green — the bug only appears through `which`→`.CMD`. This is
+  separate from the 0.139 pin: both had to be fixed for codex-native to launch.
 
 ## Pointers — where things live
 

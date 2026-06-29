@@ -282,8 +282,44 @@ def _kill_process_tree(process: _Process | None) -> None:
     _proc.kill_tree(process)
 
 
+def _resolve_codex_windows_exe(shim: Path) -> Path | None:
+    """Resolve the real ``codex.exe`` behind an npm ``.CMD`` shim on Windows.
+
+    The npm wrapper (``codex.CMD``) relaunches node with ``%*``, which re-parses
+    the argument vector through ``cmd.exe``. That mangles ``-c`` config-override
+    values containing embedded quotes + spaces — the native app-server passes
+    the provider block (``model_providers.X={name="Omnigent Provider",…}``) and
+    the MCP ``args=["-m", "omnigent…", …]`` this way — so codex sees a split
+    token (``Provider",base_url=…``) and exits with a top-level usage error,
+    surfaced as the generic ``native_terminal_start_failed``. Spawning the
+    vendored ``codex.exe`` directly bypasses the shim's re-parsing entirely.
+    The binary ships as a per-platform optional dependency under the
+    ``@openai/codex`` package.
+
+    :param shim: The ``codex.CMD`` path returned by ``shutil.which``.
+    :returns: The resolved ``codex.exe`` path, or ``None`` when the vendored
+        binary cannot be located (caller falls back to the shim).
+    """
+    pkg = shim.parent / "node_modules" / "@openai" / "codex"
+    for candidate in sorted(pkg.glob("node_modules/@openai/codex-win32-*/**/codex.exe")):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def _find_codex_cli() -> str | None:
-    return shutil.which("codex")
+    path = shutil.which("codex")
+    if path is None:
+        return None
+    # On Windows, ``which`` resolves the npm ``codex.CMD`` batch shim, whose
+    # ``%*`` re-parse corrupts quoted ``-c`` overrides. Prefer the vendored
+    # ``codex.exe`` so app-server / exec args reach codex intact. Additive and
+    # IS_WINDOWS-guarded — POSIX returns ``shutil.which`` unchanged.
+    if IS_WINDOWS and path.lower().endswith((".cmd", ".bat")):
+        exe = _resolve_codex_windows_exe(Path(path))
+        if exe is not None:
+            return str(exe)
+    return path
 
 
 async def _codex_cli_version(codex_path: str) -> tuple[int, int, int] | None:
