@@ -67,6 +67,14 @@ data-flow detail and `architecture.mmd` for the diagram.
 - **Native Windows can't run the full test/lint suite** (POSIX-only deps, `.venv/bin`
   hook paths). `ruff` runs via `uvx ruff@0.15.16`. Pure-logic unit tests under
   `tests/inner/` run natively; the full suite needs WSL2.
+- **The Bash/PowerShell tools lie about `%TEMP%`.** They run with
+  `TEMP=C:\WINDOWS\temp` (a restricted system dir); the omnigent **runner** gives a
+  child a writable temp instead. So a Windows subprocess you repro by hand can fail in
+  ways the real session never hits — **re-run any "this binary is broken on Windows"
+  finding under a real user `%TEMP%`** (`C:\Users\<you>\AppData\Local\Temp`) before
+  believing it. This exact trap once got opencode's TUI written off as upstream-broken.
+  The `diagnose-windows-native-harness` skill (`.claude/skills/`) automates the check
+  and the rest of the Windows native-harness failure chain.
 - **The auto-mode classifier blocks** direct pushes to `main` and edits to
   `.github/MAINTAINER` / CI approval gates without explicit user authorization. Hand the
   user the exact command instead.
