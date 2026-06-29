@@ -2417,7 +2417,12 @@ def _recv_exactly(sock: _socket.socket, n: int) -> bytes:
 
 
 def _inject_via_injection_server(
-    bridge_dir: Path, *, kind: str, content: str | None, timeout_s: float
+    bridge_dir: Path,
+    *,
+    kind: str,
+    content: str | None,
+    timeout_s: float,
+    auto_confirm: bool = False,
 ) -> None:
     """Windows injection: connect to the runner's loopback server and send one
     length-framed JSON request, raising on a non-ok ack.
@@ -2425,11 +2430,15 @@ def _inject_via_injection_server(
     The cross-process analogue of the tmux ``send-keys`` path: the ConPTY lives
     in the runner process and the executor cannot touch it directly, so the
     runner performs the actual readiness-gated paste and acks the result.
+    ``auto_confirm`` is forwarded for ``kind == "slash"`` so the runner sends
+    the extra confirmation Enter (``/effort`` / ``/model`` dialogs).
     """
     info = _wait_for_injection_info(bridge_dir, timeout_s=timeout_s)
     req: dict[str, Any] = {"token": info["token"], "kind": kind, "timeout_s": timeout_s}
     if content is not None:
         req["content"] = content
+    if auto_confirm:
+        req["auto_confirm"] = True
     body = json.dumps(req).encode("utf-8")
     frame = len(body).to_bytes(4, "big") + body
     try:
@@ -2701,6 +2710,19 @@ def inject_slash_command(
         raise ValueError(f"slash command must start with '/'; got {command!r}")
     if "\n" in command:
         raise ValueError("slash command must be a single line")
+    if IS_WINDOWS:
+        # ConPTY backend: inject cross-process via the runner's loopback server
+        # (no tmux). The runner types the command literally — NOT as a bracketed
+        # paste — so Claude Code's TUI parses it as a slash command rather than a
+        # plain message. See WindowsTerminalInstance.inject_slash_command.
+        _inject_via_injection_server(
+            bridge_dir,
+            kind="slash",
+            content=command,
+            timeout_s=timeout_s,
+            auto_confirm=auto_confirm,
+        )
+        return
     info = _wait_for_tmux_info(bridge_dir, timeout_s=timeout_s)
     # ``C-u`` clears any draft the user is mid-typing; otherwise the
     # paste below concatenates with their text and Enter submits

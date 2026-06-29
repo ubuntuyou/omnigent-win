@@ -40,14 +40,20 @@ import socket
 import threading
 import time
 from pathlib import Path
-from typing import Any
-
-from winpty import PtyProcess
+from typing import TYPE_CHECKING, Any
 
 from omnigent.runner.identity import strip_runner_auth_secrets
 
 from . import _proc
 from .terminal import TerminalResult, _strip_ansi
+
+if TYPE_CHECKING:
+    # pywinpty is a Windows-only dependency (see pyproject's platform marker).
+    # Import it lazily — at module top it would make this module unimportable on
+    # Linux/macOS, where the platform-agnostic logic here (smallest-wins sizing,
+    # replay, literal slash-command injection) is unit-tested. The only runtime
+    # use is ``PtyProcess.spawn`` in ``launch``, which imports it there.
+    from winpty import PtyProcess
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +99,9 @@ _SUBMIT_SETTLE_S = 0.25
 _SUBMIT_WINDOW_S = 12.0
 _SUBMIT_QUIET_S = 0.4
 _SUBMIT_CONFIRM_S = 1.2
+# Delay before the optional auto-confirm CR of a slash command, so the TUI's
+# confirmation dialog (/effort, /model) has rendered before the Enter lands.
+_SLASH_CONFIRM_S = 0.3
 # Max length-framed injection message body (loopback, same-user trust).
 _INJECT_MAX_FRAME_BYTES = 4 * 1024 * 1024
 
@@ -271,6 +280,10 @@ class WindowsTerminalInstance:
         # and other non-ASCII characters to be mangled in the chat view.
         env.setdefault("PYTHONUTF8", "1")
 
+        # Deferred import: pywinpty is Windows-only, so importing it at module
+        # load would break import on other platforms (see the TYPE_CHECKING note).
+        from winpty import PtyProcess
+
         argv = _resolve_windows_argv(self.command, self.args)
         # ConPTY initial size is deliberately small (24x80) — matching
         # _effective_size — so the first browser attach GROWS it losslessly (a
@@ -434,6 +447,38 @@ class WindowsTerminalInstance:
         finally:
             # The box is mounted by now; later messages take the fast path above.
             self._submitted_once = True
+
+    async def inject_slash_command(self, command: str, *, auto_confirm: bool = False) -> None:
+        """Type a Claude Code slash command literally and submit it.
+
+        The ConPTY analogue of the tmux ``inject_slash_command`` path. A slash
+        command MUST be typed as literal keystrokes, NOT delivered as a
+        bracketed paste: the paste markers tell Claude Code's TUI to treat the
+        content as data, so a pasted ``/compact`` lands in the draft as text and
+        submits as a normal turn instead of executing the command. So no
+        ``_build_paste_payload`` here — the raw bytes go straight to the pty,
+        exactly as ``tmux send-keys -l`` types them.
+
+        Mirrors the tmux sequence: ``C-u`` clears any draft the user is
+        mid-typing (otherwise the command concatenates with their text), then
+        the literal command, then ``Enter``. A short settle between the command
+        and the submit ``\\r`` keeps Claude from coalescing the two into one
+        pasted burst (which would defeat slash-command parsing). ``auto_confirm``
+        sends a second ``Enter`` after a beat to accept the default option of a
+        TUI confirmation dialog (``/effort`` / ``/model`` pop one; ``/compact``
+        does not); on an empty box the extra CR is a harmless no-op.
+        """
+        self.inject_payload("\x15")  # C-u: clear any in-progress draft
+        self.inject_payload(command)
+        # Let the command commit as typed input before the CR, so the two are
+        # not merged into a single coalesced paste the slash parser ignores.
+        await asyncio.sleep(_SUBMIT_SETTLE_S)
+        self.inject_payload("\r")
+        if auto_confirm:
+            # Give the TUI time to render its confirmation dialog before the
+            # auto-Enter arrives; otherwise the keystroke races the prompt.
+            await asyncio.sleep(_SLASH_CONFIRM_S)
+            self.inject_payload("\r")
 
     async def wait_until_ready(self, *, timeout_s: float = 30.0) -> bool:
         """Wait until Claude's input box has mounted AND stopped repainting.
@@ -916,6 +961,13 @@ class _InjectionServer:
         # Gate on prompt readiness so the first message of a fresh session is
         # not typed into a still-booting TUI and dropped.
         await self._instance.wait_until_ready(timeout_s=float(req.get("timeout_s", 30.0)))
+        if kind == "slash":
+            # Slash commands (/compact, /effort, /model) are typed literally,
+            # not bracket-pasted — see WindowsTerminalInstance.inject_slash_command.
+            await self._instance.inject_slash_command(
+                content, auto_confirm=bool(req.get("auto_confirm"))
+            )
+            return True, None
         # Write the paste, then submit with a quiet-gated CR resend that rides
         # out the boot-hook race (see WindowsTerminalInstance.submit_injected).
         self._instance.inject_payload(_build_paste_payload(content))
