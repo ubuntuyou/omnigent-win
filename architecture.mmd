@@ -1,0 +1,62 @@
+%% omnigent-win — Windows ConPTY architecture for the claude-native harness.
+%% Additive, IS_WINDOWS-guarded; the POSIX/tmux path is upstream-unchanged.
+%% See ARCHITECTURE.md for the prose walkthrough.
+
+flowchart TB
+    subgraph browser["Browser (web UI)"]
+        chat["Chat view<br/>(SSE-driven)"]
+        term["Terminal view<br/>TerminalSession.ts<br/>pin + letterbox"]
+        input["Chat composer<br/>(user message / slash cmd)"]
+    end
+
+    subgraph server["Omnigent server"]
+        persist["Persist items<br/>(no dedup)"]
+        sse["Per-session SSE stream"]
+        executor["claude-native executor"]
+    end
+
+    subgraph runner["Runner process (Windows)"]
+        inst["WindowsTerminalInstance<br/>omnigent/inner/terminal_windows.py"]
+        reader["reader thread → _on_output<br/>fan-out to subscribers"]
+        writeq["single write queue<br/>(atomic injection)"]
+        inj["_InjectionServer<br/>loopback TCP, token-gated"]
+        size["smallest-wins sizing<br/>+ size channel"]
+        fwd["transcript forwarder<br/>claude_native_forwarder.py<br/>_json_safe() surrogate scrub"]
+        wsbridge["bridge_conpty_to_websocket<br/>ws_bridge.py"]
+    end
+
+    claude["claude.exe<br/>(ConPTY child)<br/>PYTHONUTF8=1"]
+    jsonl[("transcript JSONL")]
+    hooks["Claude hooks<br/>UTF-8 stdin decode"]
+
+    %% terminal launch + output
+    inst -->|PtyProcess.spawn| claude
+    claude -->|stdout/stderr UTF-8| reader
+    reader --> inst
+    claude --> jsonl
+    claude --> hooks
+
+    %% chat-view path (transcript → server → SSE)
+    jsonl --> fwd
+    hooks -.->|status/session events| fwd
+    fwd -->|external_conversation_item| persist
+    persist --> sse
+    sse --> chat
+
+    %% terminal-view path (output fan-out → websocket)
+    inst --> wsbridge
+    wsbridge -->|binary frames| term
+    size -->|resize text frames| term
+    term -->|client resize| size
+    size --> inst
+
+    %% input injection path (chat → executor → injection server → write queue)
+    input --> executor
+    executor -->|inject_user_message / slash| inj
+    inj --> writeq
+    writeq -->|literal keystrokes| claude
+
+    classDef winfork fill:#cfe8ff,stroke:#3b82f6,color:#0b2942;
+    classDef child fill:#fde9c8,stroke:#d97706,color:#3a2606;
+    class inst,reader,writeq,inj,size,fwd,wsbridge,term winfork;
+    class claude,jsonl,hooks child;
