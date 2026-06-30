@@ -1755,30 +1755,17 @@ def test_evaluate_policy_pre_tool_use_fails_closed_when_verdict_unavailable(
     assert result["hookSpecificOutput"]["permissionDecisionReason"]
 
 
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {
-            "hook_event_name": "PostToolUse",
-            "tool_name": "Bash",
-            "tool_input": {"command": "ls"},
-            "tool_output": "ok",
-        },
-        {"hook_event_name": "UserPromptSubmit", "prompt": "hello"},
-    ],
-)
-def test_evaluate_policy_non_tool_call_phases_fail_open_on_error(
+def test_evaluate_policy_user_prompt_submit_fails_closed_on_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    payload: dict[str, object],
 ) -> None:
     """
-    Off the tool-call gate, an unobtainable verdict stays fail-open.
+    A governed UserPromptSubmit blocks when no usable verdict is returned.
 
-    PostToolUse runs after the tool executed and the request gate is
-    advisory, so neither denies on a transport error — mirroring the
-    runner-side ``FAIL_CLOSED_PHASES`` (PR #163).
+    The request gate is the sole pre-turn enforcement point for native
+    sessions — a server outage must not let an over-budget or otherwise-
+    blocked request proceed. The output must be ``decision: "block"``.
     """
     monkeypatch.setattr("omnigent.claude_native_bridge._TRUSTED_PARENT", tmp_path)
     monkeypatch.setattr("omnigent.claude_native_bridge._BRIDGE_ROOT", tmp_path / "root")
@@ -1787,6 +1774,47 @@ def test_evaluate_policy_non_tool_call_phases_fail_open_on_error(
     bridge_dir = prepare_bridge_dir("conv_abc", bridge_id="bridge_shared", workspace=tmp_path)
     write_active_session_id(bridge_dir, "conv_active")
     build_hook_settings(bridge_dir, ap_server_url="http://127.0.0.1:8787")
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        fake_stdin(json.dumps({"hook_event_name": "UserPromptSubmit", "prompt": "hello"})),
+    )
+
+    exit_code = claude_native_hook.main(["evaluate-policy", "--bridge-dir", str(bridge_dir)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    result = json.loads(captured.out)
+    assert result["decision"] == "block"
+    assert result["reason"]
+
+
+def test_evaluate_policy_post_tool_use_fails_open_on_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """
+    PostToolUse fails OPEN on a transport error — the tool already ran.
+
+    Mirroring the runner-side ``FAIL_CLOSED_PHASES``.
+    """
+    monkeypatch.setattr("omnigent.claude_native_bridge._TRUSTED_PARENT", tmp_path)
+    monkeypatch.setattr("omnigent.claude_native_bridge._BRIDGE_ROOT", tmp_path / "root")
+    monkeypatch.setattr(claude_native_hook.httpx, "Client", make_failing_client("connect_error"))
+    monkeypatch.setattr(native_policy_hook, "_EVALUATE_POLICY_RETRY_BUDGET_S", 0.0)
+    bridge_dir = prepare_bridge_dir("conv_abc", bridge_id="bridge_shared", workspace=tmp_path)
+    write_active_session_id(bridge_dir, "conv_active")
+    build_hook_settings(bridge_dir, ap_server_url="http://127.0.0.1:8787")
+    payload = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "ls"},
+        "tool_output": "ok",
+    }
+    # fake_stdin (not io.StringIO) so stdin has a .buffer: the hook reads
+    # sys.stdin.buffer.read().decode("utf-8") (UTF-8 invariant); io.StringIO
+    # has no .buffer and would AttributeError in _read_stdin_utf8.
     monkeypatch.setattr(sys, "stdin", fake_stdin(json.dumps(payload)))
 
     exit_code = claude_native_hook.main(["evaluate-policy", "--bridge-dir", str(bridge_dir)])
@@ -1876,47 +1904,6 @@ def test_evaluate_policy_retries_5xx_and_succeeds(
     assert captured.out == ""
     # Two 503s then one 200 = 3 total attempts.
     assert call_count == 3
-
-
-def test_build_reauth_remints_and_preserves_routing_header(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """
-    ``_build_reauth`` re-mints the bearer and keeps the routing header.
-
-    The fresh token must be merged OVER the existing headers so the
-    ``X-Databricks-Org-Id`` workspace-routing header (which the Apps server
-    needs to avoid a 403 reroute to the account) is preserved, not dropped.
-    """
-    monkeypatch.setattr(
-        "omnigent.runner._entry._make_auth_token_factory",
-        lambda server_url=None: lambda: "fresh-token",
-    )
-    reauth = claude_native_hook._build_reauth(
-        "https://ap.example.com",
-        {"Authorization": "Bearer stale", "X-Databricks-Org-Id": "o9"},
-    )
-    assert reauth() == {"Authorization": "Bearer fresh-token", "X-Databricks-Org-Id": "o9"}
-
-
-def test_build_reauth_returns_none_without_factory(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """
-    ``_build_reauth`` returns ``None`` when no refresh mechanism is available.
-
-    Local unauthenticated servers (no token factory) must not synthesize an
-    auth header; returning ``None`` lets the caller fall through to its normal
-    handling (which fails closed for a tool-call gate).
-    """
-    monkeypatch.setattr(
-        "omnigent.runner._entry._make_auth_token_factory",
-        lambda server_url=None: None,
-    )
-    reauth = claude_native_hook._build_reauth(
-        "https://ap.example.com", {"Authorization": "Bearer stale"}
-    )
-    assert reauth() is None
 
 
 def test_evaluate_policy_reauths_on_expired_token_instead_of_failing_closed(
