@@ -129,7 +129,7 @@ Claude invokes these as separate Python processes. Each reads stdin via
 `sys.stdin.buffer.read().decode("utf-8", "replace")` rather than text-mode stdin, which
 on Windows would decode as cp1252 and reintroduce mojibake.
 
-### 4.7 Frontend terminal client (`ap-web/src/components/blocks/TerminalSession.ts`)
+### 4.7 Frontend terminal client (`web/src/components/blocks/TerminalSession.ts`)
 Handles the server-pushed `resize` control frames: when the server pins a shared size,
 the client resizes its xterm grid to it (`serverPinnedSize`) and paints the leftover
 margin with a dim per-cell dot pattern (`updateLetterbox`) — the web analog of tmux
