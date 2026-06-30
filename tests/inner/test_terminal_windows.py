@@ -104,6 +104,37 @@ async def test_slash_command_typed_as_literal_keystrokes(injecting_instance) -> 
     assert "/compact" in payloads
 
 
+async def test_message_clears_input_box_before_pasting(injecting_instance) -> None:
+    """A web-chat message clears the input box with backspaces before pasting.
+
+    After an Escape-cancel (the web Stop button), Claude re-populates the input
+    box with the previous prompt; without a clear the new message pastes onto it
+    ("old promptnew prompt"). The clear is backspace (\x7f) repeated, NOT C-k/C-u:
+    those are visual-row-scoped (they leave every wrapped row but one) and, once
+    the box is empty, insert literally — rendering as box glyphs. Backspace is
+    char-scoped (crosses wrapped rows) and a no-op on an empty box, so it fully
+    clears a multi-row draft and can never insert anything. Transcript-verified
+    against a live Claude TUI.
+    """
+    injecting_instance.running = True
+    injecting_instance._bracketed_paste_seen = True
+    injecting_instance._submitted_once = True  # submit_injected fast path: one CR
+    server = tw._InjectionServer(injecting_instance)
+    ok, error = await server._dispatch(
+        {"token": server.token, "kind": "message", "content": "hello"}
+    )
+    payloads = await _flush_and_drain(injecting_instance)
+
+    assert (ok, error) == (True, None)
+    # The clear is only backspaces (never \x0b/C-k — the box-glyph regression),
+    # and precedes the bracketed paste.
+    assert payloads[0] == "\x7f" * tw._DRAFT_CLEAR_BACKSPACES
+    assert tw._DRAFT_CLEAR_BACKSPACES > 1
+    assert "\x0b" not in payloads[0]
+    assert payloads[1] == _build_paste_payload("hello")
+    assert "".join(payloads).index("\x7f") < "".join(payloads).index(_PASTE_START)
+
+
 async def test_slash_command_auto_confirm_sends_second_enter(injecting_instance) -> None:
     # /effort and /model pop a confirmation dialog; auto_confirm accepts the
     # default with a second Enter after the dialog renders.

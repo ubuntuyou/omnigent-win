@@ -102,6 +102,15 @@ _SUBMIT_CONFIRM_S = 1.2
 # Delay before the optional auto-confirm CR of a slash command, so the TUI's
 # confirmation dialog (/effort, /model) has rendered before the Enter lands.
 _SLASH_CONFIRM_S = 0.3
+# Backspaces sent to clear a leftover draft before pasting a web message. Claude
+# re-populates the input box with the previous prompt after an Escape-cancel (the
+# web Stop button); backspace (\x7f) is char-scoped so it crosses wrapped rows,
+# and deleting from an empty box is a true no-op — so excess backspaces never
+# insert anything (unlike C-k/\x0b, which inserts literally and renders as box
+# glyphs once the box is empty). 600 covers a long prompt; a longer cancelled
+# draft only partially clears (concat, never boxes). Transcript-verified against
+# a live Claude TUI (see tests + the CLAUDE.md gotcha).
+_DRAFT_CLEAR_BACKSPACES = 600
 # Max length-framed injection message body (loopback, same-user trust).
 _INJECT_MAX_FRAME_BYTES = 4 * 1024 * 1024
 
@@ -968,6 +977,19 @@ class _InjectionServer:
                 content, auto_confirm=bool(req.get("auto_confirm"))
             )
             return True, None
+        # Clear any leftover draft before pasting. After an Escape-cancel (the
+        # web Stop button sends one), Claude Code re-populates the input box with
+        # the previous prompt for re-editing; without this clear the new message
+        # pastes onto that stale text ("old promptnew prompt" with no separator).
+        # Use backspace (\x7f), NOT C-k/C-u: those are scoped to the current
+        # *visual row* (so they leave every wrapped row but one) and, once the box
+        # is empty, stop being consumed and insert literally — rendering as box
+        # glyphs in the prompt. Backspace is char-scoped (crosses wrapped rows) and
+        # is a true no-op on an empty box, so it fully clears a multi-row draft and
+        # can never insert anything. The injection write queue preserves order, so
+        # these all drain before the paste below — no interleaving. See
+        # _DRAFT_CLEAR_BACKSPACES.
+        self._instance.inject_payload("\x7f" * _DRAFT_CLEAR_BACKSPACES)
         # Write the paste, then submit with a quiet-gated CR resend that rides
         # out the boot-hook race (see WindowsTerminalInstance.submit_injected).
         self._instance.inject_payload(_build_paste_payload(content))
