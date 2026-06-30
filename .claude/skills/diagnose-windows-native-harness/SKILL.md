@@ -1,6 +1,6 @@
 ---
 name: diagnose-windows-native-harness
-description: Diagnose why an Omnigent native harness (opencode / codex / cursor / goose / qwen / claude) fails to launch its server or render its TUI on Windows. Walks the recurring failure chain — stale readiness, a serve/subprocess fast-fail from a stripped env, and a TUI that won't render because of a missing DLL or a bad %TEMP% — and ships a ConPTY PTY-probe (pty_probe.py) to reproduce the TUI launch outside the runner. Load when porting a native harness to Windows, when a Windows session shows "not configured" / "not supported on Windows" / a dead terminal panel, or when a Windows subprocess crashes with 0xC0000409 or DLL error 126. The remaining tmux-only harnesses (codex/cursor/goose/qwen) will each need this.
+description: Diagnose why an Omnigent native harness (opencode / codex / cursor / goose / qwen / claude) fails to launch its server or render its TUI on Windows. Walks the recurring failure chain — stale readiness, a serve/subprocess fast-fail from a stripped env, and a TUI that won't render because of a missing DLL or a bad %TEMP% — and ships a ConPTY PTY-probe (pty_probe.py) to reproduce the TUI launch outside the runner. Also covers verifying a keystroke-INJECTION change (message paste, draft-clear, slash command, interrupt) against ground truth via transcript_probe.py, since the terminal echo and a pyte screen both lie about control chars. Load when porting a native harness to Windows, when a Windows session shows "not configured" / "not supported on Windows" / a dead terminal panel, when a Windows subprocess crashes with 0xC0000409 or DLL error 126, or when changing/verifying what the web composer injects into the claude/goose-native TUI. The remaining tmux-only harnesses (codex/cursor/goose/qwen) will each need this.
 ---
 
 # Diagnosing a native harness on Windows
@@ -125,6 +125,39 @@ whatever bad value the runner inherited.
 
 ---
 
+## Verifying a keystroke-INJECTION change: read the transcript, not the screen
+
+A different failure mode from "won't launch": when you change what the web composer
+**injects** into a running TUI (the message paste, the draft-clear, a slash command, an
+interrupt) on the claude-native or goose-native Windows path, neither the terminal echo
+nor a pyte-rendered screen can tell you what was actually submitted. The echo **hides**
+control chars; pyte **interprets** them (it reads `\x0b` as cursor-down). So both can show
+a clean line while a stray control char is really in the submitted string. That exact
+false green shipped the box-glyph draft-clear bug: a clear sequence inserted ~1400 literal
+`\x0b`, each rendered as a box in the chat view, while pyte and the echo both looked fine.
+
+Ground truth is Claude's **transcript JSONL** — the submitted text is stored verbatim,
+where an injected `\x0b` survives as `U+000B`. `transcript_probe.py` drives a live `claude`
+on the ConPTY backend and reports precisely that:
+
+```bash
+.venv/Scripts/python.exe .claude/skills/diagnose-windows-native-harness/transcript_probe.py \
+    --inject '\x7f' --repeat 600 --repop
+```
+
+`--repop` reproduces the real cancel-then-retype path (submit a draft, Escape to cancel,
+Claude re-populates the box for re-editing) which is the **precondition** for the draft
+clash. The verdict is `CLEAN` / `BOXES(n x U+000B)` / `CONCAT(stale draft survived)`.
+
+Two traps it bakes in:
+- The child `claude` inherits `CLAUDE_CODE_SESSION_ID` / `CLAUDE_CODE_CHILD_SESSION` from
+  this session and then writes **no** transcript (it thinks it is a child turn). The probe
+  `env_unset`s them; if you roll your own and get `NO-TRANSCRIPT`, that is why.
+- Clear a draft with **backspace (`\x7f`)**, never C-k (`\x0b`) / C-u (`\x15`): those are
+  visual-row-scoped and, once the box is empty, insert literally and render as boxes.
+  Backspace is char-scoped and a true no-op on an empty box. (Full rationale in CLAUDE.md
+  "Clear Claude's input box with backspaces".)
+
 ## Windows exit-code / error cheat sheet
 
 | Code | Meaning | Usual cause in a harness child |
@@ -152,4 +185,5 @@ so `omnigent` and `winpty` import.
 | OpenCode serve/attach env (template fix) | `omnigent/opencode_native_app_server.py` (`filtered_server_env`, `opencode_terminal_env`, `_opencode_windows_tempdir`) |
 | Attach-TUI launch site | `omnigent/runner/app.py` (`_auto_create_opencode_terminal`) |
 | ConPTY backend + argv resolver | `omnigent/inner/terminal_windows.py` (`WindowsTerminalInstance.launch`, `_resolve_windows_argv`) |
+| Claude-native injection (paste / clear / slash / interrupt) + its verifier | `omnigent/inner/terminal_windows.py` (`_InjectionServer._dispatch`); `transcript_probe.py` |
 | Generic Windows error mask | `omnigent/runner/app.py` (`_native_terminal_start_error`, `IS_WINDOWS`) |

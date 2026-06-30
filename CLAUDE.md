@@ -25,8 +25,22 @@ the diagram.
   button does nothing.
 - Sync via the `upstream` remote with a merge:
   ```
-  git checkout main && git fetch upstream && git merge upstream/main && git push origin main
+  git checkout main && git fetch upstream && git merge upstream/main
   ```
+  The documented `git push origin main` is **classifier-blocked** (direct main push), so in
+  practice commit the merge on a branch and open a sync PR. Merge it with **`--merge`, not
+  squash**, so `upstream/main` stays a recorded parent and the *next* sync doesn't try to
+  re-merge (and re-conflict) the same commits. Two clashes recur on essentially every sync:
+  - **`io.StringIO` stdin mocks vs our `.buffer` hooks.** Upstream's hook tests mock stdin
+    with `io.StringIO`, which has **no `.buffer`** — but our Claude hooks read
+    `sys.stdin.buffer` (invariant #2, `_read_stdin_utf8`), so those mocks `AttributeError`.
+    After each merge, grep the merged tree for `io.StringIO` feeding `sys.stdin` in the
+    **claude-native** hook tests and convert to `fake_stdin` (`tests/native_hook_helpers.py`).
+    They can sneak in via a *clean* auto-merge, not just a conflict, so scan don't assume.
+    Leave codex/cursor/kimi alone — those hooks read `sys.stdin.read()` (plain text).
+  - **`CLAUDE.md` add/add conflict.** Upstream made its `CLAUDE.md` a symlink to `AGENTS.md`;
+    always keep **ours** (`git checkout --ours CLAUDE.md`). Their `AGENTS.md` arrives as a
+    harmless new file.
 - `gh` is **not on PATH**; it lives at
   `C:\Users\Joe\AppData\Local\Microsoft\WinGet\Packages\GitHub.cli_Microsoft.Winget.Source_8wekyb3d8bbwe\bin\gh.exe`.
 - Because the `upstream` remote exists, `gh pr create` defaults its base repo to
@@ -35,6 +49,13 @@ the diagram.
 - CI inherits upstream's gates. **Maintainer Approval** passes because `ubuntuyou` is in
   `.github/MAINTAINER`. The upstream Linux E2E/pytest shards don't exercise the Windows
   ConPTY path, so they're admin-merged past once Maintainer Approval + Pre-commit are green.
+  The **`E2E UI Required`** gate also fails in this fork by design: its
+  `e2e-ui-required/check.sh` calls an LLM judge over a gateway, but the fork has no
+  `OPENAI_BASE_URL`/`OPENAI_API_KEY` secret, so `curl` aborts with *"No host part in the
+  URL"*. It's **deterministic — re-running won't fix it**. The real `E2E UI Tests (shard
+  N/3)` jobs still pass, so merge past it with `gh pr merge --admin` (needs explicit user
+  authorization) or have a maintainer add the `skip-e2e-ui-test` label (the gate's own
+  suggested escape hatch).
 
 ## Invariants — do not break these
 
@@ -63,7 +84,7 @@ the diagram.
 
 - **The served web bundle is prebuilt and gitignored.** The server serves
   `omnigent/server/static/web-ui` (built by `vite build`). Frontend edits do nothing
-  until you `cd ap-web && npm run build`, then hard-refresh the browser. A stale bundle
+  until you `cd web && npm run build`, then hard-refresh the browser. A stale bundle
   is the #1 "my fix didn't take" cause.
 - **Changes only take effect after a runner/server restart.** Backend edits load at
   launch; always restart before dogfooding.
@@ -204,7 +225,7 @@ the diagram.
 | Transcript forwarder + surrogate scrub | `omnigent/claude_native_forwarder.py` (`_json_safe`, `forward_claude_transcript_to_session`) |
 | ConPTY → WebSocket bridge | `omnigent/terminals/ws_bridge.py` (`bridge_conpty_to_websocket`) |
 | UTF-8 stdin in hooks | `omnigent/claude_native_{hook,status,message_display_hook}.py` |
-| Frontend terminal client (pin/letterbox) | `ap-web/src/components/blocks/TerminalSession.ts` |
+| Frontend terminal client (pin/letterbox) | `web/src/components/blocks/TerminalSession.ts` |
 | Windows unit tests | `tests/inner/test_terminal_windows.py` |
 | OpenCode Windows env (SystemRoot + writable TEMP) | `omnigent/opencode_native_app_server.py` (`filtered_server_env`, `opencode_terminal_env`, `_opencode_windows_tempdir`) |
 | OpenCode attach-TUI launch | `omnigent/runner/app.py` (`_auto_create_opencode_terminal`) |
@@ -223,7 +244,7 @@ the diagram.
 
 1. Backend: `uvx ruff@0.15.16 check <files>` + `uvx ruff@0.15.16 format --check <files>`.
 2. Logic tests: `uv run --extra dev python -m pytest tests/inner/test_terminal_windows.py`.
-3. Frontend: `cd ap-web && npx tsc --noEmit && npx vitest run src/components/blocks/TerminalSession.test.ts`, then `npm run build`.
+3. Frontend: `cd web && npx tsc --noEmit && npx vitest run src/components/blocks/TerminalSession.test.ts`, then `npm run build`.
 4. Restart the runner/server, hard-refresh the browser, dogfood the actual flow.
 5. Runner logs live at `~/.omnigent/logs/host-runner/runner-*.log` — both the mojibake
    and doubling bugs leave fingerprints there (`UnicodeEncodeError: '\udcXX'` for the
