@@ -160,6 +160,39 @@ the diagram.
   Pi-specific Windows commit; "Pi works on Windows" is true precisely because the injection
   path was never tmux-coupled. (Contrast goose/cursor/claude, which simulate keystrokes and
   therefore each needed the injection-server branch.)
+- **Clear Claude's input box with backspaces (`\x7f`), never C-k/C-u.** The message-path
+  clear in `terminal_windows.py` `_InjectionServer._dispatch` sends `"\x7f" * _DRAFT_CLEAR_BACKSPACES`
+  (600) before the bracketed paste. After an Escape-cancel (the web Stop button) Claude
+  re-populates the input box with the previous prompt for re-editing; without a clear the new
+  message pastes onto that stale draft (`oldtailnewmsg`, no separator).
+  - **Why backspace, not the kill keys.** Claude's TUI scopes **C-k (`\x0b`) and C-u (`\x15`)
+    to the current *visual row***, so a wrapped multi-row draft needs one press per row — and
+    once the box is empty the *excess* `\x0b` stop being consumed as a keystroke and **insert
+    literally**, rendering as `□` box glyphs. Shipping `"\x01" + "\x0b"*200` once put a solid
+    row of ~200 boxes on **every** web message (the clear runs before every paste, even on an
+    empty box). The leading `\x0b` are whitespace to Python so the *content* looked clean
+    server-side, but the chat view renders each as a box (the transcript held 1401 ``).
+    Backspace is **char-scoped** (crosses wrapped rows) and is a **true no-op on an empty box**
+    (you can't delete what isn't there), so it fully clears a multi-row draft and can *never*
+    insert anything. The injection write queue preserves order, so the backspaces drain before
+    the paste — no interleaving into the new message.
+  - **Bound:** 600 backspaces covers a long prompt; a *longer* cancelled draft only partially
+    clears (concat, never boxes). Cursor sits at the draft end after re-populate, so plain
+    backspace (no C-e/C-a prefix) clears it — verified. C-u×40 also clears cleanly, but
+    backspace's empty-box safety is **structural**, not version-dependent, so it's the pick.
+  - The **interrupt path stays a lone Escape** on purpose — the re-populate is Claude's
+    intended re-edit UX and clearing there is timing-fragile.
+  - **How it was verified (and a trap avoided).** Ground truth is Claude's **transcript JSONL**
+    (the submitted string, where `\x0b` survives as ``) — *not* the terminal echo (hides
+    control chars) and *not* a pyte screen (pyte reads `\x0b` as cursor-down → false green; that
+    misdiagnosis is what shipped the box bug). The probe (`scratchpad/clearbox_v3.py`) drives a
+    real `claude` via `WindowsTerminalInstance` and reads the transcript. **Gotcha:** a child
+    `claude` inherits `CLAUDE_CODE_SESSION_ID` / `CLAUDE_CODE_CHILD_SESSION` from this session
+    and then writes **no** transcript (it thinks it's a child turn) — the probe must `env_unset`
+    both so it's a fresh top-level session under `~/.claude/projects/<cwd-key>/`.
+  - The **POSIX twin** (`claude_native_bridge.py` `inject_user_message`, C-a/C-k via tmux
+    send-keys) has the same row-scoped limitation; left untouched per invariant #1 (validate any
+    POSIX fix under WSL2). If ported, use backspace there too — **not** repeated C-k.
 
 ## Pointers — where things live
 
