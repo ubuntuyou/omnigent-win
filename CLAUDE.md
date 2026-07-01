@@ -9,10 +9,11 @@ adds a parallel **ConPTY backend** (via [`pywinpty`](https://pypi.org/project/py
 so native agent harnesses run on **Windows 11**, streamed to the Omnigent web UI.
 
 **Working native harnesses on Windows:** **Claude Code** (`claude`), **OpenCode**
-(`opencode`), **Pi** (`pi`), **Codex** (`codex`), and **Goose** (`goose`). The remaining
-tmux-only ones (cursor / qwen / kimi / hermes / kiro / antigravity) still need the port —
-the `diagnose-windows-native-harness` skill walks the recurring failure chain. (Pi needed
-no port — its injection is file/RPC-based, not tmux; see the Pi gotcha below.)
+(`opencode`), **Pi** (`pi`), **Codex** (`codex`), **Goose** (`goose`), and **Qwen Code**
+(`qwen`). The remaining tmux-only ones (cursor / kimi / hermes / kiro / antigravity) still
+need the port — the `diagnose-windows-native-harness` skill walks the recurring failure
+chain. (Pi needed no port — its injection is file/RPC-based, not tmux; see the Pi gotcha
+below.)
 
 Every change is **purely additive and `IS_WINDOWS`-guarded** — the POSIX/tmux path is
 untouched. See `ARCHITECTURE.md` for the data-flow detail and `architecture.mmd` for
@@ -181,6 +182,35 @@ the diagram.
   Pi-specific Windows commit; "Pi works on Windows" is true precisely because the injection
   path was never tmux-coupled. (Contrast goose/cursor/claude, which simulate keystrokes and
   therefore each needed the injection-server branch.)
+- **Qwen Code on Windows: a TUI-mirror harness like Claude/Goose, plus a resume-slug
+  gotcha.** Qwen ships a real npm-installed CLI (`qwen`, behind the same `.CMD`-shim shape
+  as Codex — spawn resolution matters, see the Codex shim gotcha) and is provider-agnostic
+  via `~/.qwen/.env` (`OPENAI_API_KEY`/`OPENAI_BASE_URL`/`OPENAI_MODEL`), written by
+  omnigent, not qwen's own login flow. **Model must carry the provider's full suffix**
+  (e.g. `glm-5.2:cloud` for Ollama Cloud) — the bare model id from `config.yaml`'s
+  `models.default` fails with "hard limit: 0" because qwen doesn't know the bare id's
+  context window. Injection (`inject_user_message`/`inject_interrupt`) follows the same
+  `IS_WINDOWS` injection-server branch as Goose; `kill_session` is an intentional no-op on
+  Windows (unit-tested: `test_kill_session_windows_is_a_noop`) — the ConPTY teardown
+  happens separately via `_teardown_session_terminals` in `runner/app.py`, same pattern as
+  every other native harness. **Resume uses qwen's own internal session UUID**, not the
+  omnigent conversation id — `omnigent` maps conversation -> qwen UUID via
+  `qwen_session_id_for_conversation` and passes `--resume <uuid>`. qwen keys its on-disk
+  chat history by a project slug (`~/.qwen/projects/<slug>/chats/`) computed from the
+  *lowercased* realpath of the workspace with non-alphanumerics replaced by `-` (verified
+  against a live v0.19.4 session: workspace `C:\` -> qwen creates `c--`, not `C--`) —
+  `_qwen_project_slug()` in `qwen_native_bridge.py` matches this exactly (case included) so
+  `--resume` can find qwen's history; NTFS is case-insensitive so a case mismatch wouldn't
+  have broken it in practice, but it's the correct byte-for-byte match now regardless.
+  **Interrupted turns show no "cancelled" badge** in the chat view — this is inherent to
+  qwen's own event format, not a bug: qwen's `stop_reason` is `null` on every assistant
+  message whether interrupted or not, with no other cancel signal in its event stream or
+  on-disk chat log (contrast Claude, which writes literal `"[Request interrupted by user]"`
+  into its own transcript that the frontend pattern-matches; contrast Codex, which sets a
+  real `status: "interrupted"` field the forwarder reads into the generic
+  `MessageData.interrupted` bool). Fixing this for qwen would need `inject_interrupt` to
+  write a side-channel sentinel the forwarder correlates against the in-flight response — a
+  real design change, not attempted here.
 - **Clear Claude's input box with backspaces (`\x7f`), never C-k/C-u.** The message-path
   clear in `terminal_windows.py` `_InjectionServer._dispatch` sends `"\x7f" * _DRAFT_CLEAR_BACKSPACES`
   (600) before the bracketed paste. After an Escape-cancel (the web Stop button) Claude
@@ -239,6 +269,13 @@ the diagram.
 | Goose terminal auto-create + injection server | `omnigent/runner/app.py` (`_auto_create_goose_terminal`) |
 | Goose transcript forwarder + Windows SQLite path | `omnigent/goose_native_forwarder.py` (`default_sessions_db`) |
 | Goose Windows unit tests | `tests/test_goose_native_bridge.py`, `tests/test_goose_native_forwarder.py` |
+| Qwen picker readiness + executable/model resolution | `omnigent/qwen_native.py` (`resolve_qwen_executable`, `_configured_qwen_command`) |
+| Qwen injection (Windows branch), interrupt, kill | `omnigent/qwen_native_bridge.py` (`inject_interrupt`, `kill_session`, `submit_user_message`) |
+| Qwen terminal auto-create + interrupt/stop routes | `omnigent/runner/app.py` (`_auto_create_qwen_terminal`, `_handle_qwen_native_interrupt`, `_handle_qwen_native_stop`) |
+| Qwen transcript forwarder | `omnigent/qwen_native_forwarder.py` (`forward_qwen_events_to_session`, `supervise_qwen_forwarder`) |
+| Qwen resume slug + session recording | `omnigent/qwen_native_bridge.py` (`_qwen_project_slug`, `qwen_session_id_for_conversation`, `qwen_session_recording_path`) |
+| Qwen approval mirror | `omnigent/qwen_native_permissions.py` (`supervise_qwen_approval_mirror`) |
+| Qwen Windows unit tests | `tests/test_qwen_native_bridge.py`, `tests/test_qwen_native_forwarder.py`, `tests/test_qwen_native.py` |
 
 ## Verifying a change
 
