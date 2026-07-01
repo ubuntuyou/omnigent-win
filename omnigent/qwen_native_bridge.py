@@ -35,11 +35,14 @@ import secrets
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from omnigent._platform import IS_WINDOWS, stable_user_id
 
 #: Env var carrying the bridge dir into the harness executor process.
 BRIDGE_DIR_ENV_VAR = "HARNESS_QWEN_NATIVE_BRIDGE_DIR"
@@ -49,15 +52,7 @@ BRIDGE_DIR_ENV_VAR = "HARNESS_QWEN_NATIVE_BRIDGE_DIR"
 #: qwen recording (resume would mint a new id and lose history).
 _QWEN_SESSION_NAMESPACE = uuid.UUID("6b6f3d2e-9a1c-5e84-bf0a-1d7c5a2e9f43")
 
-# ``os.getuid`` is POSIX-only; on Windows this module can still be imported (the
-# claude-native security check ``_trusted_parent_for_bridge_dir`` imports it to
-# resolve a trusted root), so fall back to -1 rather than crashing at import.
-# This root is never actually used on Windows — qwen-native is POSIX-only.
-_BRIDGE_ROOT = (
-    Path(os.environ.get("TMPDIR", "/tmp"))
-    / f"omnigent-{getattr(os, 'getuid', lambda: -1)()}"
-    / "qwen-native"
-)
+_BRIDGE_ROOT = Path(tempfile.gettempdir()) / f"omnigent-{stable_user_id()}" / "qwen-native"
 _TMUX_FILE = "tmux.json"
 #: JSONL command file qwen watches (``--input-file``); we append to it.
 _INPUT_FILE = "qwen_in.jsonl"
@@ -113,15 +108,17 @@ def qwen_session_id_for_conversation(conversation_id: str) -> str:
 
 
 def _qwen_project_slug(workspace: Path | str) -> str:
-    """Return qwen's per-project directory slug for *workspace*.
+    r"""Return qwen's per-project directory slug for *workspace*.
 
-    qwen keys its on-disk session store by project: the cwd's real path with
-    every non-alphanumeric character replaced by ``-`` (verified against qwen
-    v0.18.1 — e.g. ``/private/tmp/qwen_x`` → ``-private-tmp-qwen-x``). Uses
+    qwen keys its on-disk session store by project: the cwd's real path,
+    lowercased, with every non-alphanumeric character replaced by ``-``
+    (verified against qwen v0.19.4 on Windows — e.g. ``C:\`` -> ``c--``,
+    ``C:\Users\Joe\omnigent-win`` -> ``c--users-joe-omnigent-win``; the
+    lowercasing applies to the whole path, not just the drive letter). Uses
     ``realpath`` because the runner launches qwen with ``cwd=realpath(workspace)``
     and qwen records under ``process.cwd()``.
     """
-    real = os.path.realpath(str(workspace))
+    real = os.path.realpath(str(workspace)).lower()
     return re.sub(r"[^A-Za-z0-9]", "-", real)
 
 
@@ -700,8 +697,18 @@ def write_tmux_target(
     socket_path: Path,
     tmux_target: str,
     pid: int | None = None,
+    input_host: str | None = None,
+    input_port: int | None = None,
+    input_token: str | None = None,
 ) -> None:
-    """Advertise the tmux socket + target for the running qwen terminal."""
+    """Advertise the tmux socket + target for the running qwen terminal.
+
+    On Windows there is no tmux socket: the runner stands up a loopback
+    injection server for the ConPTY and advertises its ``host/port/token``
+    here instead (the tmux fields stay as harmless placeholders). Only
+    :func:`inject_interrupt` reads them — message submission itself stays
+    file-based on every platform (see :func:`submit_user_message`).
+    """
     _ensure_dir(bridge_dir)
     payload: dict[str, Any] = {
         "socket_path": str(socket_path),
@@ -710,6 +717,10 @@ def write_tmux_target(
     }
     if pid is not None:
         payload["pid"] = pid
+    if input_host is not None and input_port is not None and input_token is not None:
+        payload["input_host"] = input_host
+        payload["input_port"] = input_port
+        payload["input_token"] = input_token
     tmp = bridge_dir / (_TMUX_FILE + ".tmp")
     tmp.write_text(json.dumps(payload), encoding="utf-8")
     os.replace(tmp, bridge_dir / _TMUX_FILE)
@@ -776,6 +787,13 @@ def inject_interrupt(bridge_dir: Path, *, timeout_s: float = _TMUX_READY_TIMEOUT
 
     :raises RuntimeError: If the tmux target is not advertised or send-keys fails.
     """
+    if IS_WINDOWS:
+        from omnigent.claude_native_bridge import _inject_via_injection_server
+
+        _inject_via_injection_server(
+            bridge_dir, kind="interrupt", content=None, timeout_s=timeout_s
+        )
+        return
     info = _wait_for_tmux_info(bridge_dir, timeout_s=timeout_s)
     # No ``-l``: tmux must interpret ``Escape`` as a key name.
     _run_tmux(info["socket_path"], "send-keys", "-t", info["tmux_target"], "Escape")
@@ -789,5 +807,11 @@ def kill_session(bridge_dir: Path, *, timeout_s: float = _TMUX_READY_TIMEOUT_S) 
 
     :raises RuntimeError: If the tmux target is not advertised or kill-session fails.
     """
+    if IS_WINDOWS:
+        # No tmux session to kill on Windows; the caller
+        # (_handle_qwen_native_stop in runner/app.py) already calls
+        # _teardown_session_terminals right after this, which closes the
+        # ConPTY terminal directly and force-kills the process tree.
+        return
     info = _wait_for_tmux_info(bridge_dir, timeout_s=timeout_s)
     _run_tmux(info["socket_path"], "kill-session", "-t", info["tmux_target"])

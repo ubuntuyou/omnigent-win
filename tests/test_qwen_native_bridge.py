@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
 
 import pytest
 
+import omnigent.claude_native_bridge as cnb
 from omnigent import qwen_native_bridge
 
 
@@ -111,3 +113,89 @@ def test_write_mcp_bridge_config_rejects_symlinked_ancestor(
         qwen_native_bridge.write_mcp_bridge_config(bridge_dir)
     # No token leaked into the redirected location.
     assert not (elsewhere / "qwen-native").exists()
+
+
+def test_bridge_root_uses_stable_user_id_under_system_temp() -> None:
+    """``bridge_root`` is Windows-safe: no ``os.getuid``, no ``TMPDIR``-only lookup."""
+    root = qwen_native_bridge.bridge_root()
+    assert root.name == "qwen-native"
+    assert root.parent.name.startswith("omnigent-")
+    assert root.parent.parent == Path(tempfile.gettempdir())
+
+
+def test_qwen_project_slug_lowercases_like_real_qwen(tmp_path: Path) -> None:
+    """qwen lowercases the whole realpath before slugging, not just replacing separators.
+
+    Verified against a live qwen v0.19.4 session on Windows: workspace ``C:\\`` produced
+    an on-disk directory named ``c--`` (lowercase), not ``C--``; a mixed-case repo path
+    lowercased the whole slug, not just the drive letter. NTFS is case-insensitive so a
+    missing ``.lower()`` doesn't break ``--resume`` lookups on Windows in practice, but
+    it's a real deviation from qwen's own scheme that would break on a case-sensitive fs.
+    Uses a tmp_path fixture (mixed-case components) rather than a literal Windows path so
+    this test stays portable to the WSL2-run full suite.
+    """
+    ws = tmp_path / "MixedCase" / "RepoDir"
+    ws.mkdir(parents=True)
+    slug = qwen_native_bridge._qwen_project_slug(ws)
+    assert slug == slug.lower()
+    assert "mixedcase" in slug
+    assert "repodir" in slug
+
+
+def _forbid_tmux(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make any tmux-path call fail loudly, proving the Windows branch returned."""
+
+    def boom(*_a, **_k):
+        raise AssertionError("tmux path used on Windows")
+
+    monkeypatch.setattr(qwen_native_bridge, "_wait_for_tmux_info", boom)
+    monkeypatch.setattr(qwen_native_bridge, "_run_tmux", boom)
+
+
+def test_inject_interrupt_windows_uses_injection_server(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(qwen_native_bridge, "IS_WINDOWS", True)
+    _forbid_tmux(monkeypatch)
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        cnb,
+        "_inject_via_injection_server",
+        lambda bridge_dir, *, kind, content, timeout_s: calls.append((kind, content)),
+    )
+
+    qwen_native_bridge.inject_interrupt(tmp_path, timeout_s=1.0)
+
+    assert calls == [("interrupt", None)]
+
+
+def test_kill_session_windows_is_a_noop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """No tmux session exists on Windows; the ConPTY teardown happens elsewhere
+    (``_teardown_session_terminals`` in ``runner/app.py``, called right after)."""
+    monkeypatch.setattr(qwen_native_bridge, "IS_WINDOWS", True)
+    _forbid_tmux(monkeypatch)
+
+    qwen_native_bridge.kill_session(tmp_path, timeout_s=1.0)
+
+
+def test_write_tmux_target_advertises_injection_endpoint(tmp_path: Path) -> None:
+    qwen_native_bridge.write_tmux_target(
+        tmp_path,
+        socket_path=Path("/placeholder"),
+        tmux_target="placeholder",
+        input_host="127.0.0.1",
+        input_port=5050,
+        input_token="tok",
+    )
+    info = json.loads((tmp_path / "tmux.json").read_text(encoding="utf-8"))
+    assert info["input_host"] == "127.0.0.1"
+    assert info["input_port"] == 5050
+    assert info["input_token"] == "tok"
+
+
+def test_write_tmux_target_omits_injection_fields_without_endpoint(tmp_path: Path) -> None:
+    """The POSIX call passes no injection endpoint; the fields stay absent."""
+    qwen_native_bridge.write_tmux_target(tmp_path, socket_path=Path("/sock"), tmux_target="t")
+    info = json.loads((tmp_path / "tmux.json").read_text(encoding="utf-8"))
+    assert "input_host" not in info
+    assert "input_token" not in info
