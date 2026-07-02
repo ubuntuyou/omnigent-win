@@ -46,6 +46,21 @@ def test_render_hooks_toml_is_valid_and_complete() -> None:
         assert hook["timeout"] == 600
 
 
+def test_render_hooks_toml_escapes_windows_backslashes() -> None:
+    # Windows paths (python.exe, bridge_dir) are backslash-separated and land
+    # raw inside a TOML basic string ("..."), where backslash is an escape
+    # char — an unescaped "\Users" parses as an (invalid) \U unicode escape
+    # and kimi refuses to boot. shlex.quote (POSIX-only) does not escape
+    # backslashes, so render_kimi_hooks_toml must do it itself.
+    toml = render_kimi_hooks_toml(
+        bridge_dir=Path(r"C:\Users\joe\AppData\Local\Temp\bridge"),
+        python_executable=r"C:\Users\joe\omnigent-win\.venv\Scripts\python.exe",
+    )
+    parsed = tomllib.loads(toml)
+    for hook in parsed["hooks"]:
+        assert r"C:\Users\joe" in hook["command"]
+
+
 def test_build_session_home_preserves_user_config_and_appends_hooks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
