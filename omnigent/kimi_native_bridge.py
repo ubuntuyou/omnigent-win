@@ -21,10 +21,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+from omnigent._platform import IS_WINDOWS, stable_user_id
+
 #: Env var carrying the bridge dir into the harness executor process.
 BRIDGE_DIR_ENV_VAR = "HARNESS_KIMI_NATIVE_BRIDGE_DIR"
 
-_BRIDGE_ROOT = Path(os.environ.get("TMPDIR", "/tmp")) / f"omnigent-{os.getuid()}" / "kimi-native"
+_BRIDGE_ROOT = Path(tempfile.gettempdir()) / f"omnigent-{stable_user_id()}" / "kimi-native"
 _TMUX_FILE = "tmux.json"
 # Omnigent routing details the kimi hook subprocess reads to reach the server.
 # Mirrors claude-native's ``permission_hook.json`` (server URL + auth headers +
@@ -148,8 +150,18 @@ def write_tmux_target(
     socket_path: Path,
     tmux_target: str,
     pid: int | None = None,
+    input_host: str | None = None,
+    input_port: int | None = None,
+    input_token: str | None = None,
 ) -> None:
-    """Advertise the tmux socket + target for the running Kimi terminal."""
+    """Advertise the tmux socket + target for the running Kimi terminal.
+
+    On Windows there is no tmux socket: the runner stands up a loopback
+    injection server for the ConPTY and advertises its ``host/port/token``
+    here instead (the tmux fields stay as harmless placeholders). The
+    kimi-native executor reads them via :func:`_inject_via_injection_server`
+    — the cross-process analogue of the tmux ``send-keys`` paste.
+    """
     _ensure_dir(bridge_dir)
     payload: dict[str, Any] = {
         "socket_path": str(socket_path),
@@ -158,6 +170,10 @@ def write_tmux_target(
     }
     if pid is not None:
         payload["pid"] = pid
+    if input_host is not None and input_port is not None and input_token is not None:
+        payload["input_host"] = input_host
+        payload["input_port"] = input_port
+        payload["input_token"] = input_token
     tmp = bridge_dir / (_TMUX_FILE + ".tmp")
     tmp.write_text(json.dumps(payload), encoding="utf-8")
     os.replace(tmp, bridge_dir / _TMUX_FILE)
@@ -314,6 +330,18 @@ def inject_user_message(
     """
     if not content:
         raise RuntimeError("kimi-native injection requires non-empty content")
+    if IS_WINDOWS:
+        # ConPTY backend: no tmux. Inject cross-process via the runner's loopback
+        # injection server (readiness gating + the bracketed-paste write happen on
+        # the runner side, which owns the ConPTY). Reuses the single Windows
+        # injection client in claude_native_bridge so the socket-framing logic has
+        # one home (per the fork's "fork-only files own new behavior" invariant).
+        from omnigent.claude_native_bridge import _inject_via_injection_server
+
+        _inject_via_injection_server(
+            bridge_dir, kind="message", content=content, timeout_s=timeout_s
+        )
+        return
     info = _wait_for_tmux_info(bridge_dir, timeout_s=timeout_s)
     socket_path = info["socket_path"]
     tmux_target = info["tmux_target"]
@@ -374,6 +402,13 @@ def inject_interrupt(bridge_dir: Path, *, timeout_s: float = _TMUX_READY_TIMEOUT
 
     :raises RuntimeError: If the tmux target is not advertised or send-keys fails.
     """
+    if IS_WINDOWS:
+        from omnigent.claude_native_bridge import _inject_via_injection_server
+
+        _inject_via_injection_server(
+            bridge_dir, kind="interrupt", content=None, timeout_s=timeout_s
+        )
+        return
     info = _wait_for_tmux_info(bridge_dir, timeout_s=timeout_s)
     # No ``-l``: tmux must interpret ``Escape`` as a key name.
     _run_tmux(info["socket_path"], "send-keys", "-t", info["tmux_target"], "Escape")
@@ -411,6 +446,32 @@ def inject_approval_keystroke(
         permission menu was not present (already answered / closed / TUI gone).
     :raises RuntimeError: If the tmux target is not advertised or send-keys fails.
     """
+    if IS_WINDOWS:
+        # ConPTY backend: no tmux pane to ``capture-pane`` from this (out-of-
+        # process) side, so unlike the POSIX path below this cannot gate on
+        # _PERMISSION_PROMPT_MARKER before typing — the runner-side screen
+        # buffer isn't exposed over the injection-server wire protocol, only
+        # "type these bytes". The existing injection-server ``kind`` vocabulary
+        # doesn't fit either: "message" bracket-pastes + clears the draft (wrong
+        # framing for a menu digit, and there is no draft to clear), and
+        # "interrupt" is hardcoded to a single fixed key (Escape). So this reuses
+        # the generic literal-typing path added alongside kimi's port —
+        # ``kind="keys"`` in ``_InjectionServer._dispatch`` — which types *content*
+        # verbatim with no draft-clear/paste framing, mirroring how "slash" types
+        # a command literally (minus its C-u draft-clear, since a permission menu
+        # has no draft to clear). The digit and the confirming Enter are sent as
+        # one write (``key + "\r"``), the same two-keystroke shape as the POSIX
+        # ``send-keys`` pair below. Always attempts the injection and returns
+        # ``True`` on success — there is no cheap way to confirm the menu was
+        # still showing, so a stale verdict (already answered/closed) risks a
+        # stray keystroke landing on whatever is on screen next, same as any
+        # other blind keystroke send on this platform.
+        from omnigent.claude_native_bridge import _inject_via_injection_server
+
+        _inject_via_injection_server(
+            bridge_dir, kind="keys", content=key + "\r", timeout_s=timeout_s
+        )
+        return True
     info = _wait_for_tmux_info(bridge_dir, timeout_s=timeout_s)
     socket_path = info["socket_path"]
     tmux_target = info["tmux_target"]
@@ -434,5 +495,11 @@ def kill_session(bridge_dir: Path, *, timeout_s: float = _TMUX_READY_TIMEOUT_S) 
 
     :raises RuntimeError: If the tmux target is not advertised or kill-session fails.
     """
+    if IS_WINDOWS:
+        # No tmux session to kill on Windows; the caller
+        # (_handle_kimi_native_stop in runner/app.py) already calls
+        # _teardown_session_terminals right after this, which closes the
+        # ConPTY terminal directly and force-kills the process tree.
+        return
     info = _wait_for_tmux_info(bridge_dir, timeout_s=timeout_s)
     _run_tmux(info["socket_path"], "kill-session", "-t", info["tmux_target"])

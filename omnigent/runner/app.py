@@ -192,10 +192,10 @@ _NATIVE_TERMINAL_START_FAILED_CODE = "native_terminal_start_failed"
 # start failure is a *real* error (the ConPTY itself works), so the client gets
 # "see runner logs" rather than the misleading "not supported on Windows" — which
 # would send the user chasing a non-existent platform limitation. The remaining
-# tmux-only harnesses (cursor / kimi / kiro / antigravity / hermes) keep
+# tmux-only harnesses (cursor / kiro / antigravity / hermes) keep
 # the accurate "not supported" message. Lowercased runtime names.
 _WINDOWS_NATIVE_TERMINAL_HARNESSES = frozenset(
-    {"claude", "codex", "pi", "opencode", "goose", "qwen"}
+    {"claude", "codex", "pi", "opencode", "goose", "qwen", "kimi"}
 )
 # Read budget for runner→server POSTs that can PARK behind a human-approval
 # ASK gate: policy evaluation (``_evaluate_policy_via_omnigent``) and sub-agent
@@ -3375,11 +3375,29 @@ async def _auto_create_kimi_terminal(
     if terminal_registry is not None:
         instance = terminal_registry.get(session_id, "kimi", "main")
         if instance is not None and instance.running:
-            write_tmux_target(
-                bridge_dir,
-                socket_path=instance.socket_path,
-                tmux_target=instance.tmux_target,
-            )
+            if IS_WINDOWS:
+                # ConPTY backend: no tmux socket. Stand up (idempotently) the
+                # instance's loopback injection server and advertise its
+                # endpoint so the out-of-process kimi-native executor can
+                # inject web-chat messages. The tmux fields stay as harmless
+                # placeholders.
+                from omnigent.inner.terminal_windows import ensure_injection_server
+
+                server = ensure_injection_server(instance)
+                write_tmux_target(
+                    bridge_dir,
+                    socket_path=instance.socket_path,
+                    tmux_target=instance.tmux_target,
+                    input_host=server.host,
+                    input_port=server.port,
+                    input_token=server.token,
+                )
+            else:
+                write_tmux_target(
+                    bridge_dir,
+                    socket_path=instance.socket_path,
+                    tmux_target=instance.tmux_target,
+                )
     publish_event(
         session_id,
         {

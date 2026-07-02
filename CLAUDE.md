@@ -9,11 +9,11 @@ adds a parallel **ConPTY backend** (via [`pywinpty`](https://pypi.org/project/py
 so native agent harnesses run on **Windows 11**, streamed to the Omnigent web UI.
 
 **Working native harnesses on Windows:** **Claude Code** (`claude`), **OpenCode**
-(`opencode`), **Pi** (`pi`), **Codex** (`codex`), **Goose** (`goose`), and **Qwen Code**
-(`qwen`). The remaining tmux-only ones (cursor / kimi / hermes / kiro / antigravity) still
-need the port — the `diagnose-windows-native-harness` skill walks the recurring failure
-chain. (Pi needed no port — its injection is file/RPC-based, not tmux; see the Pi gotcha
-below.)
+(`opencode`), **Pi** (`pi`), **Codex** (`codex`), **Goose** (`goose`), **Qwen Code**
+(`qwen`), and **Kimi CLI** (`kimi`). The remaining tmux-only ones (cursor / hermes / kiro /
+antigravity) still need the port — the `diagnose-windows-native-harness` skill walks the
+recurring failure chain. (Pi needed no port — its injection is file/RPC-based, not tmux;
+see the Pi gotcha below.)
 
 Every change is **purely additive and `IS_WINDOWS`-guarded** — the POSIX/tmux path is
 untouched. See `ARCHITECTURE.md` for the data-flow detail and `architecture.mmd` for
@@ -211,6 +211,27 @@ the diagram.
   `MessageData.interrupted` bool). Fixing this for qwen would need `inject_interrupt` to
   write a side-channel sentinel the forwarder correlates against the in-flight response — a
   real design change, not attempted here.
+- **Kimi CLI on Windows: a TUI-mirror harness like Goose (full tmux-typing injection), not
+  file-based like Qwen.** Every web-chat message goes through `kimi_native_bridge.py`
+  `inject_user_message` — bracketed-paste (draft-clear + paste + submit-Enter) on POSIX,
+  the same `IS_WINDOWS` injection-server branch (`kind="message"`) as Goose/Qwen on
+  Windows. `_BRIDGE_ROOT` had the same `os.getuid()`/`TMPDIR` POSIX-ism Qwen's had before
+  its port; fixed to `tempfile.gettempdir()` + `stable_user_id()`. `kill_session` is the
+  same intentional Windows no-op as Goose/Qwen — `_handle_kimi_native_stop` in
+  `runner/app.py` calls `_teardown_session_terminals` right after, which closes the ConPTY
+  directly. **`inject_approval_keystroke` (kimi's web Approve/Deny → a numbered-menu digit,
+  unique to kimi — Goose has no equivalent function) needed a genuinely new Windows
+  primitive.** The injection server's existing `kind` vocabulary didn't fit: `"message"`
+  bracket-pastes and clears a draft (wrong framing for a menu digit, and there's no draft
+  to clear over a permission menu), and `"interrupt"` is hardcoded to one fixed key
+  (Escape). Added a minimal `kind="keys"` case to `_InjectionServer._dispatch`
+  (`terminal_windows.py`) that types arbitrary literal content with no draft-clear/paste
+  framing — the digit + a confirming `\r` sent as one write. Unlike the POSIX path, this
+  Windows branch **cannot** gate on `_PERMISSION_PROMPT_MARKER` first (no cheap way to
+  capture the runner-owned ConPTY screen over the injection-server wire protocol from the
+  out-of-process bridge), so it always attempts the keystroke and returns `True` rather
+  than no-op'ing on a stale verdict — not verified against a live `kimi` TUI, only against
+  the dispatch code path.
 - **Clear Claude's input box with backspaces (`\x7f`), never C-k/C-u.** The message-path
   clear in `terminal_windows.py` `_InjectionServer._dispatch` sends `"\x7f" * _DRAFT_CLEAR_BACKSPACES`
   (600) before the bracketed paste. After an Escape-cancel (the web Stop button) Claude
@@ -276,6 +297,11 @@ the diagram.
 | Qwen resume slug + session recording | `omnigent/qwen_native_bridge.py` (`_qwen_project_slug`, `qwen_session_id_for_conversation`, `qwen_session_recording_path`) |
 | Qwen approval mirror | `omnigent/qwen_native_permissions.py` (`supervise_qwen_approval_mirror`) |
 | Qwen Windows unit tests | `tests/test_qwen_native_bridge.py`, `tests/test_qwen_native_forwarder.py`, `tests/test_qwen_native.py` |
+| Kimi injection (Windows branch), interrupt, kill, approval keystroke | `omnigent/kimi_native_bridge.py` (`inject_user_message`, `inject_interrupt`, `kill_session`, `inject_approval_keystroke`) |
+| Kimi approval-keystroke Windows primitive | `omnigent/inner/terminal_windows.py` (`_InjectionServer._dispatch`, `kind="keys"`) |
+| Kimi terminal auto-create + injection server | `omnigent/runner/app.py` (`_auto_create_kimi_terminal`, `_handle_kimi_native_stop`) |
+| Kimi transcript forwarder | `omnigent/kimi_native_forwarder.py` (`supervise_kimi_forwarder`) |
+| Kimi Windows unit tests | `tests/test_kimi_native_bridge.py` |
 
 ## Verifying a change
 
