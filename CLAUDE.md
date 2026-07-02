@@ -230,8 +230,32 @@ the diagram.
   Windows branch **cannot** gate on `_PERMISSION_PROMPT_MARKER` first (no cheap way to
   capture the runner-owned ConPTY screen over the injection-server wire protocol from the
   out-of-process bridge), so it always attempts the keystroke and returns `True` rather
-  than no-op'ing on a stale verdict — not verified against a live `kimi` TUI, only against
-  the dispatch code path.
+  than no-op'ing on a stale verdict — attempted against a live e2e session (see below) but
+  never actually triggered kimi's permission menu, so it's still only verified against the
+  dispatch code path + unit tests, not a real approve/deny.
+- **Kimi's own generated `config.toml` broke on Windows independent of the injection port** —
+  `kimi_native_credentials.py`'s `render_kimi_hooks_toml()` builds the `[[hooks]] command = "..."`
+  line via `shlex.quote`, which is POSIX-only and never escapes backslashes. On Windows the
+  embedded paths (python executable, bridge dir) are backslash-separated, so a raw `\Users`
+  landed inside a TOML **basic string** (where backslash is an escape char) and kimi's own TOML
+  parser rejected it as an invalid `\U` unicode escape — the ConPTY died on every session before
+  the harness ever got a chance to run. Fixed by escaping `\` and `"` in the rendered command
+  before embedding. Caught via live e2e (below), not by unit tests, since the existing test's
+  `Path("/tmp/b r")` literal happens to round-trip through `WindowsPath` with a rendering quirk
+  that pre-existing test never exercised the backslash-in-basic-string case either — see
+  `test_render_hooks_toml_escapes_windows_backslashes`.
+- **E2e verified (2026-07-01) against a live kimi CLI v0.21.1 session**, real server + runner +
+  ConPTY, Ollama Cloud/glm-5.2 provider: terminal boot and `kind="message"` injection confirmed
+  end-to-end (real assistant reply through the full inject → kimi → transcript-forward path);
+  `kind="interrupt"` exercised without error but the turn was already idle, so it's a weak
+  signal; stop/teardown confirmed clean (`kimi.exe` process gone, `runner_online` → `false`).
+  `kind="keys"` (approval keystroke) still unverified — see above. Note for future e2e attempts:
+  `POST /v1/sessions` with `host_id` set on Windows requires the workspace to already be a native
+  Windows path (`C:\...`) — a **separate, pre-existing, harness-agnostic bug** in
+  `_workspace_validation.py`/`sessions.py` initially rejected this (`workspace must be an
+  absolute path starting with /`), unlike `hosts.py`'s directory-browse endpoint which already
+  special-cases Windows drive letters. Confirmed unrelated to kimi with a goose-native control
+  session. Not fixed as part of the kimi-native port; needs its own fix if hit again.
 - **Clear Claude's input box with backspaces (`\x7f`), never C-k/C-u.** The message-path
   clear in `terminal_windows.py` `_InjectionServer._dispatch` sends `"\x7f" * _DRAFT_CLEAR_BACKSPACES`
   (600) before the bracketed paste. After an Escape-cancel (the web Stop button) Claude
