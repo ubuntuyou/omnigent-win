@@ -5,11 +5,11 @@ for a failed native-terminal auto-create. On Windows the message must
 distinguish:
 
 - harnesses ported to the ConPTY backend (claude / codex / pi / opencode /
-  goose / qwen): a start failure is a *real* error → "see runner logs" (the
-  ConPTY itself works, so "not supported on Windows" would send the user
+  goose / qwen / kimi): a start failure is a *real* error → "see runner logs"
+  (the ConPTY itself works, so "not supported on Windows" would send the user
   chasing a non-existent platform limitation);
-- still-tmux-only harnesses (cursor / kimi / kiro / ...): genuinely
-  unsupported → keep the actionable "not supported on Windows" message.
+- still-tmux-only harnesses (cursor / kiro / ...): genuinely unsupported →
+  keep the actionable "not supported on Windows" message.
 
 The raw cause is always logged for operators, never surfaced to the client.
 """
@@ -42,6 +42,14 @@ def test_windows_goose_points_at_runner_logs(monkeypatch):
 def test_windows_qwen_points_at_runner_logs(monkeypatch):
     monkeypatch.setattr(app_mod, "IS_WINDOWS", True)
     payload = _native_terminal_start_error_payload(RuntimeError("boom"), "Qwen")
+    assert payload["code"] == _NATIVE_TERMINAL_START_FAILED_CODE
+    assert "not supported on Windows" not in payload["message"]
+    assert "runner logs" in payload["message"]
+
+
+def test_windows_kimi_points_at_runner_logs(monkeypatch):
+    monkeypatch.setattr(app_mod, "IS_WINDOWS", True)
+    payload = _native_terminal_start_error_payload(RuntimeError("boom"), "Kimi")
     assert payload["code"] == _NATIVE_TERMINAL_START_FAILED_CODE
     assert "not supported on Windows" not in payload["message"]
     assert "runner logs" in payload["message"]
