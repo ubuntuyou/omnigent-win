@@ -23,7 +23,9 @@ KIRO_ACP_RECORD_PATH_ENV_VAR = "KIRO_ACP_RECORD_PATH"
 # same fix applied to qwen/kimi's _BRIDGE_ROOT before their Windows ports);
 # kiro itself is not yet ported, but the module must still be importable.
 _BRIDGE_ROOT = (
-    Path(os.environ.get("TMPDIR", tempfile.gettempdir())) / f"omnigent-{stable_user_id()}" / "kiro-native"
+    Path(os.environ.get("TMPDIR", tempfile.gettempdir()))
+    / f"omnigent-{stable_user_id()}"
+    / "kiro-native"
 )
 _TMUX_FILE = "tmux.json"
 _FORWARDER_READY_FILE = "kiro_session_forwarder_ready.json"
