@@ -63,7 +63,11 @@ from omnigent.runner.identity import (
     RUNNER_WORKSPACE_ENV_VAR,
     token_bound_runner_id,
 )
-from omnigent.runner.transports.ws_tunnel.limits import RUNNER_TUNNEL_MAX_MESSAGE_BYTES
+from omnigent.runner.transports.ws_tunnel.limits import (
+    RUNNER_TUNNEL_MAX_MESSAGE_BYTES,
+    TUNNEL_KEEPALIVE_PING_INTERVAL_S,
+    TUNNEL_KEEPALIVE_PING_TIMEOUT_S,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -1147,6 +1151,7 @@ def test_server_command_reads_tunnel_token_and_does_not_spawn_runner(
     :returns: None.
     """
     import uvicorn
+    import uvicorn.server
 
     captured: dict[str, Any] = {}
 
@@ -1161,22 +1166,27 @@ def test_server_command_reads_tunnel_token_and_does_not_spawn_runner(
         captured["create_app_kwargs"] = kwargs
         return _original_create_app(**kwargs)
 
-    def _fake_uvicorn_run(app: Any, **kwargs: Any) -> None:
-        """Skip the blocking server loop.
+    def _fake_server_run(self: Any) -> None:
+        """Skip the blocking server loop; capture config as flat kwargs dict.
 
-        :param app: FastAPI app instance built by ``create_app``.
-        :param kwargs: Uvicorn options (host, port).
+        :param self: The uvicorn Server instance whose config holds all options.
         :returns: None.
         """
-        del app
-        captured["uvicorn_kwargs"] = kwargs
+        captured["uvicorn_kwargs"] = {
+            "ws_max_size": self.config.ws_max_size,
+            "ws_ping_interval": self.config.ws_ping_interval,
+            "ws_ping_timeout": self.config.ws_ping_timeout,
+            "log_config": self.config.log_config,
+            "port": self.config.port,
+            "host": self.config.host,
+        }
         captured["uvicorn_called"] = True
 
     from omnigent.server import app as app_module
 
     _original_create_app = app_module.create_app
     monkeypatch.setattr(app_module, "create_app", _spy_create_app)
-    monkeypatch.setattr(uvicorn, "run", _fake_uvicorn_run)
+    monkeypatch.setattr(uvicorn.server.Server, "run", _fake_server_run)
     monkeypatch.setenv("OMNIGENT_RUNNER_TUNNEL_TOKEN", "test-tunnel-token-abc")
 
     # On a loopback bind the `server` command reuses an already-running
@@ -1212,6 +1222,10 @@ def test_server_command_reads_tunnel_token_and_does_not_spawn_runner(
     assert result.exit_code == 0, result.output
     assert captured.get("uvicorn_called") is True
     assert captured["uvicorn_kwargs"]["ws_max_size"] == RUNNER_TUNNEL_MAX_MESSAGE_BYTES
+    # Tunnel protocol keepalive aligned to the 90s app-level budget, not uvicorn's
+    # 20s default that drops a busy-but-healthy tunnel with 1011 (issue #1116).
+    assert captured["uvicorn_kwargs"]["ws_ping_interval"] == TUNNEL_KEEPALIVE_PING_INTERVAL_S
+    assert captured["uvicorn_kwargs"]["ws_ping_timeout"] == TUNNEL_KEEPALIVE_PING_TIMEOUT_S
     assert (
         captured["uvicorn_kwargs"]["log_config"]["formatters"]["access"]["()"]
         == "omnigent.server.performance_metrics.RequestDurationAccessFormatter"
@@ -1240,6 +1254,7 @@ def test_server_with_explicit_db_does_not_reuse_canonical_server(
     shared pidfile.
     """
     import uvicorn
+    import uvicorn.server
 
     captured: dict[str, Any] = {}
     _original_create_app = None
@@ -1253,22 +1268,20 @@ def test_server_with_explicit_db_does_not_reuse_canonical_server(
         captured["create_app_kwargs"] = kwargs
         return _original_create_app(**kwargs)
 
-    def _fake_uvicorn_run(app: Any, **kwargs: Any) -> None:
+    def _fake_server_run(self: Any) -> None:
         """Skip the blocking server loop, record that it was called.
 
-        :param app: FastAPI app built by ``create_app``.
-        :param kwargs: Uvicorn options (host, port, ...).
+        :param self: The uvicorn Server instance.
         :returns: None.
         """
-        del app
-        captured["uvicorn_kwargs"] = kwargs
+        captured["uvicorn_kwargs"] = {"port": self.config.port}
         captured["uvicorn_called"] = True
 
     from omnigent.server import app as app_module
 
     _original_create_app = app_module.create_app
     monkeypatch.setattr(app_module, "create_app", _spy_create_app)
-    monkeypatch.setattr(uvicorn, "run", _fake_uvicorn_run)
+    monkeypatch.setattr(uvicorn.server.Server, "run", _fake_server_run)
 
     # A healthy canonical server EXISTS. A bare `omnigent server` would
     # reuse it; an explicit-DB server must ignore it. register/clear must
@@ -1326,19 +1339,18 @@ def test_server_with_explicit_port_does_not_check_canonical_server(
     :returns: None.
     """
     import uvicorn
+    import uvicorn.server
 
     captured: dict[str, Any] = {}
 
-    def _fake_uvicorn_run(app: Any, **kwargs: Any) -> None:
+    def _fake_server_run(self: Any) -> None:
         """
         Skip the blocking server loop.
 
-        :param app: FastAPI app instance built by ``create_app``.
-        :param kwargs: Uvicorn options (host, port).
+        :param self: The uvicorn Server instance.
         :returns: None.
         """
-        del app
-        captured["uvicorn_kwargs"] = kwargs
+        captured["uvicorn_kwargs"] = {"port": self.config.port}
 
     def _must_not_check_existing() -> str | None:
         """
@@ -1359,7 +1371,7 @@ def test_server_with_explicit_port_does_not_check_canonical_server(
 
     from omnigent.host import local_server as _local_server_mod
 
-    monkeypatch.setattr(uvicorn, "run", _fake_uvicorn_run)
+    monkeypatch.setattr(uvicorn.server.Server, "run", _fake_server_run)
     monkeypatch.setattr(_local_server_mod, "local_server_url_if_healthy", _must_not_check_existing)
     monkeypatch.setattr(_local_server_mod, "register_local_server", _must_not_touch_pidfile)
     monkeypatch.setattr(_local_server_mod, "clear_local_server_record", _must_not_touch_pidfile)
@@ -1439,19 +1451,18 @@ def test_server_command_explicit_port_uses_bind_probe_not_connect_probe(
     import socket
 
     import uvicorn
+    import uvicorn.server
 
     captured: dict[str, Any] = {}
 
-    def _fake_uvicorn_run(app: Any, **kwargs: Any) -> None:
+    def _fake_server_run(self: Any) -> None:
         """
         Skip the blocking server loop.
 
-        :param app: FastAPI app instance built by ``create_app``.
-        :param kwargs: Uvicorn options (host, port).
+        :param self: The uvicorn Server instance.
         :returns: None.
         """
-        del app
-        captured["uvicorn_kwargs"] = kwargs
+        captured["uvicorn_kwargs"] = {"port": self.config.port}
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.bind(("127.0.0.1", 0))
@@ -1460,7 +1471,7 @@ def test_server_command_explicit_port_uses_bind_probe_not_connect_probe(
     with pytest.raises(OSError):
         socket.create_connection(("127.0.0.1", port), timeout=0.01)
 
-    monkeypatch.setattr(uvicorn, "run", _fake_uvicorn_run)
+    monkeypatch.setattr(uvicorn.server.Server, "run", _fake_server_run)
     monkeypatch.setenv("OMNIGENT_AUTH_ENABLED", "0")
 
     db_path = tmp_path / "chat.db"
@@ -2336,6 +2347,25 @@ def test_materialize_harness_launcher_file_writes_omnigent_yaml() -> None:
     # turn through the Databricks gateway. A "profile" key here means the
     # removed baking behavior came back.
     assert "profile" not in raw["executor"], raw["executor"]
+
+
+def test_materialize_harness_launcher_file_acp_slug() -> None:
+    """``run --harness acp:<slug>`` produces a valid spec that keeps the slug.
+
+    acp:<slug> canonicalizes to the base ``acp`` harness, but the slug selects a
+    configured ACP agent resolved at spawn — so executor.harness must keep the
+    full ``acp:<slug>``. The agent name has no colon (the validator requires
+    [a-zA-Z0-9_-]+), so it is sanitized to ``acp-<slug>``.
+    """
+    import re
+
+    generated = _materialize_harness_launcher_file(
+        harness="acp:qwenacp", model=None, system_prompt=None
+    )
+    raw = yaml.safe_load(generated.read_text())
+    assert raw["executor"]["harness"] == "acp:qwenacp"  # slug preserved for the runner
+    assert raw["name"] == "acp-qwenacp"
+    assert re.fullmatch(r"[a-zA-Z0-9_-]+", raw["name"])  # passes the agent-name validator
 
 
 def test_materialize_harness_launcher_file_kimi_gets_os_env() -> None:

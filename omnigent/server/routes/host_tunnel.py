@@ -31,6 +31,7 @@ from omnigent.host.frames import (
     HostHelloFrame,
     HostLaunchRunnerResultFrame,
     HostListDirResultFrame,
+    HostListWorktreesResultFrame,
     HostRemoveWorktreeResultFrame,
     HostRunnerExitedFrame,
     HostStatResultFrame,
@@ -414,6 +415,14 @@ async def _receive_loop(
                 )
                 continue
             if isinstance(runner_frame, PongFrame):
+                # Host-tunnel keepalive round-trip. DEBUG because pings are
+                # frequent — opt in via log level. ``ts`` is epoch-ms stamped
+                # when the server pinged, so now - ts is the daemon round-trip.
+                _logger.debug(
+                    "host %s tunnel keepalive: pong rtt=%dms",
+                    host_id,
+                    int(time.time() * 1000) - runner_frame.ts,
+                )
                 continue
             _logger.warning(
                 "Host %s sent unexpected runner frame; dropping: kind=%s",
@@ -517,6 +526,18 @@ async def _receive_loop(
                 remove_wt_future.set_result(
                     {
                         "status": frame.status,
+                        "error": frame.error,
+                    }
+                )
+            continue
+
+        if isinstance(frame, HostListWorktreesResultFrame):
+            list_wt_future = conn.pending_list_worktrees.pop(frame.request_id, None)
+            if list_wt_future is not None and not list_wt_future.done():
+                list_wt_future.set_result(
+                    {
+                        "status": frame.status,
+                        "worktrees": frame.worktrees,
                         "error": frame.error,
                     }
                 )

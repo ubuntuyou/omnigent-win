@@ -43,6 +43,7 @@ import {
 } from "./lib/routing";
 import { initChatStore } from "./store/chatStore";
 import "./index.css";
+import { QueueFlushProvider } from "./hooks/QueueFlushProvider";
 import { SessionUpdatesProvider } from "./hooks/SessionUpdatesProvider";
 
 export type { OmnigentHostConfig } from "./lib/host";
@@ -106,6 +107,8 @@ const SERVER_INFO_OFFLINE_FALLBACK: ServerInfo = {
   databricks_features: false,
   managed_sandboxes_enabled: false,
   sandbox_provider: null,
+  sharing_mode: "on",
+  public_sharing_enabled: true,
   server_version: null,
   smart_routing_enabled: false,
 };
@@ -205,7 +208,9 @@ function OmnigentProviders({
                   <EmbedCapabilitiesProvider>
                     <SessionUpdatesProvider>
                       <RunnerHealthProvider>
-                        <App basename={basename} />
+                        <QueueFlushProvider>
+                          <App basename={basename} />
+                        </QueueFlushProvider>
                       </RunnerHealthProvider>
                     </SessionUpdatesProvider>
                   </EmbedCapabilitiesProvider>

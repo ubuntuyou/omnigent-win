@@ -16,7 +16,7 @@ import re
 import shutil
 import tempfile
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -385,7 +385,7 @@ async def _create_subprocess_exec(*args: Any, **kwargs: Any) -> asyncio.subproce
     return await asyncio.create_subprocess_exec(*args, **kwargs)
 
 
-def _clean_codex_env() -> dict[str, str]:
+def _clean_codex_env(extra_allow: Iterable[str] = ()) -> dict[str, str]:
     """
     Build a filtered copy of ``os.environ`` for the codex subprocess.
 
@@ -428,13 +428,25 @@ def _clean_codex_env() -> dict[str, str]:
         # main (WSAEPROVIDERFAILEDINIT / 0xC0000409). Empty tuple on POSIX, so the
         # POSIX allowlist is byte-for-byte unchanged.
         *(WINDOWS_ENV_PASSTHROUGH if IS_WINDOWS else ()),
-    }
+    } | set(extra_allow)
     for key, value in os.environ.items():
         if key in _CODEX_ENV_DENY_EXACT:
             continue
         if key in allow_exact or key.startswith(allow_prefixes):
             env[key] = value
     return env
+
+
+def _declared_passthrough(os_env: OSEnvSpec | None) -> tuple[str, ...]:
+    """Env-var names an agent declared for tool passthrough.
+
+    Lives on ``os_env.sandbox.env_passthrough`` (an
+    :class:`OSEnvSandboxSpec` field), not on ``OSEnvSpec`` directly.
+    Returns an empty tuple when any link in that chain is absent.
+    """
+    if os_env is not None and os_env.sandbox is not None and os_env.sandbox.env_passthrough:
+        return tuple(os_env.sandbox.env_passthrough)
+    return ()
 
 
 def codex_skill_sources(bundle_dir: Path | None, home: Path) -> list[Path]:
@@ -2178,7 +2190,7 @@ class CodexExecutor(Executor):
         if not resolved_codex:
             raise ImportError("CodexExecutor requires the 'codex' CLI on PATH.")
         self._codex_path = resolved_codex
-        self._env = _clean_codex_env()
+        self._env = _clean_codex_env(_declared_passthrough(self._os_env_spec))
         # Retry policy → OpenAI SDK env vars (Codex uses the OpenAI
         # SDK internally). Speculative — empirical audit pending.
         self._retry_policy = retry_policy if retry_policy is not None else RetryPolicy()

@@ -881,8 +881,12 @@ def _claude_internal_write_roots() -> list[pathlib.Path]:
 def _claude_internal_write_files() -> list[pathlib.Path]:
     """Exact files the Claude CLI updates outside its writable roots."""
 
-    path = pathlib.Path.home() / ".claude.json"
-    return [path] if path.exists() else []
+    # .credentials.json holds the Claude CLI's OAuth token on Linux.
+    candidates = [
+        pathlib.Path.home() / ".claude.json",
+        pathlib.Path.home() / ".claude" / ".credentials.json",
+    ]
+    return [path for path in candidates if path.exists()]
 
 
 def prepare_claude_cli_path(
@@ -2517,6 +2521,30 @@ class ClaudeSDKExecutor(Executor):
         if terminal_error:
             yield ExecutorError(message=terminal_error)
             return
+
+        # A turn can finish the stream without ever yielding a
+        # ``ResultMessage`` — the CLI can close the stream early, or the
+        # turn can be cut short before its final usage is reported. In
+        # that case ``turn_usage`` is None and the context-occupancy
+        # meter freezes at the previous successful turn's value, hiding
+        # real window fill exactly when a session is in trouble (#1533).
+        # We already observed the latest prompt size from ``message_start``
+        # (``last_call_usage``), so synthesize a usage dict from it and let
+        # ``TurnComplete`` carry it. ``context_tokens`` (window fill) is the
+        # meaningful field here; ``output_tokens`` is unknown on an
+        # incomplete turn, so report 0 rather than guess. The full
+        # ``ResultMessage`` path above still wins whenever it runs.
+        if turn_usage is None and last_call_usage is not None:
+            ctx_in = last_call_usage.get("input_tokens") or 0
+            ctx_cc = last_call_usage.get("cache_creation_input_tokens") or 0
+            ctx_cr = last_call_usage.get("cache_read_input_tokens") or 0
+            turn_usage = {
+                "input_tokens": ctx_in,
+                "output_tokens": 0,
+                "total_tokens": ctx_in,
+                "context_tokens": ctx_in + ctx_cc + ctx_cr,
+                "model": observed_model or model,
+            }
 
         # ── LLM_RESPONSE policy evaluation ───────────────────────
         # Evaluate after the stream completes but before TurnComplete
