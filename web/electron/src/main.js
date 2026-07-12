@@ -16,6 +16,7 @@
 const {
   app,
   BrowserWindow,
+  WebContentsView,
   Menu,
   Notification,
   clipboard,
@@ -30,9 +31,14 @@ const {
 const fs = require("node:fs");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
+const { execFile } = require("node:child_process");
 const { registerLocalhostCors } = require("./localhost_cors");
 const { normalizeUrl, expandDatabricksWorkspaceUrl } = require("./url");
 const { registerWorkspaceChromeHide } = require("./workspace-chrome");
+const { createBrowserViewRegistry } = require("./browserViewRegistry");
+const { createBrowserViewBoundsController } = require("./browserViewBounds");
+const { registerBrowserIpc } = require("./browserIpc");
+const { registerSessionExpiryReload } = require("./session-expiry");
 const omnigentCli = require("./omnigent_cli");
 const serverManager = require("./server_manager");
 
@@ -385,6 +391,39 @@ function registerLocalhostAccess() {
   registerLocalhostCors(session.defaultSession, isLocalhostTrustedOrigin);
 }
 
+// Per-window timestamp of the last expired-session reload, so a host whose SSO
+// stays expired doesn't reload-loop. An expired session redirects EVERY API
+// call to the login page (many redirects per second — and the reload itself
+// triggers fresh API calls), so a "once until next navigation" guard would
+// clear on its own reload and loop. A minimum interval caps reloads to one per
+// window per interval regardless: enough to re-run the host's auth challenge,
+// never a tight loop. In the normal case the gate full-page-redirects the
+// reload's top-level navigation to its login page, so no further API calls
+// (hence no further redirects) fire anyway.
+const _lastExpiryReloadAt = new WeakMap();
+const _EXPIRY_RELOAD_MIN_INTERVAL_MS = 15_000;
+
+/**
+ * Recover the desktop window when the workspace SSO session expires.
+ *
+ * When the auth gate redirects a connected server's API call to its login
+ * page, reload every window pinned to that origin so the gate can re-challenge
+ * — see session-expiry.js. A desktop user has no address bar to refresh out of
+ * the resulting "Failed to load" state manually, so the shell does it.
+ */
+function registerSessionExpiryAccess() {
+  registerSessionExpiryReload(session.defaultSession, isPinnedServerUrl, (origin) => {
+    const now = Date.now();
+    for (const [win, state] of windows) {
+      if (state.origin !== origin || win.isDestroyed()) continue;
+      const last = _lastExpiryReloadAt.get(win) ?? 0;
+      if (now - last < _EXPIRY_RELOAD_MIN_INTERVAL_MS) continue;
+      _lastExpiryReloadAt.set(win, now);
+      win.webContents.reload();
+    }
+  });
+}
+
 /**
  * Override the macOS dock icon at runtime. In `electron .` (dev) the dock tile
  * name AND icon are read from the generic prebuilt Electron.app bundle, so they
@@ -426,6 +465,8 @@ function applyDockIcon() {
  *   so the OS badge aggregates per distinct ORIGIN (not per window — two
  *   windows on the same server report the same number and must not be
  *   double-counted), then sums across origins.
+ * @property {ReturnType<typeof createBrowserViewRegistry>} [browserRegistry]
+ *   Per-conversation embedded-browser view registry for this window.
  *
  * @type {Map<BrowserWindow, WindowState>}
  */
@@ -892,6 +933,8 @@ function createWindow(targetUrl, opts = {}) {
     serverUrl: destination,
     ephemeral,
     badgeCount: 0,
+    // Per-conversation embedded-browser view registry for this window.
+    browserRegistry: createBrowserRegistryForWindow(win),
   });
   if (destination) {
     void win.loadURL(destination);
@@ -964,6 +1007,12 @@ function createWindow(targetUrl, opts = {}) {
   // connect. Connecting is an explicit action from the host menu.
 
   win.on("closed", () => {
+    // Destroy this window's embedded-browser views, else they leak webContents.
+    try {
+      windows.get(win)?.browserRegistry?.closeAll("window-closed");
+    } catch {
+      /* registry already torn down */
+    }
     windows.delete(win);
     updateBadge(); // drop this window's contribution from the app-wide badge
   });
@@ -1362,6 +1411,127 @@ function signalForeground() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Notification sound (macOS). The frontmost app's own OS-notification sound is
+// suppressed by macOS, so to make the alert audible in BOTH the foreground and
+// the background we play a system sound ourselves with `afplay` and mute the
+// toast's built-in sound (see the notify handler). The chosen sound and the
+// on/off switch live in the native Notifications menu, persisted in settings
+// (`notification_sound_enabled`, `notification_sound_name`).
+// ---------------------------------------------------------------------------
+
+const SYSTEM_SOUNDS_DIR = "/System/Library/Sounds";
+// A pleasant default that ships on every macOS. Used when nothing is saved or
+// the saved name no longer resolves to a file.
+const DEFAULT_NOTIFICATION_SOUND = "Glass";
+// Fallback list if the system sounds dir can't be read (matches stock macOS).
+const FALLBACK_SYSTEM_SOUNDS = [
+  "Basso",
+  "Blow",
+  "Bottle",
+  "Frog",
+  "Funk",
+  "Glass",
+  "Hero",
+  "Morse",
+  "Ping",
+  "Pop",
+  "Purr",
+  "Sosumi",
+  "Submarine",
+  "Tink",
+];
+
+/**
+ * The macOS built-in notification sounds, by name (no extension), sorted.
+ * Reads `/System/Library/Sounds` so the list tracks the OS; falls back to the
+ * stock set if the directory can't be read.
+ *
+ * @returns {string[]} e.g. `["Basso", "Blow", ... "Tink"]`.
+ */
+function systemSoundNames() {
+  try {
+    const names = fs
+      .readdirSync(SYSTEM_SOUNDS_DIR)
+      .filter((f) => f.endsWith(".aiff"))
+      .map((f) => f.replace(/\.aiff$/, ""));
+    return names.length > 0 ? names.sort() : FALLBACK_SYSTEM_SOUNDS;
+  } catch {
+    return FALLBACK_SYSTEM_SOUNDS;
+  }
+}
+
+/**
+ * Whether the notification sound is enabled. Opt-in: OFF unless the user has
+ * explicitly turned it on via the Notifications menu, so a fresh install stays
+ * silent until the user asks for sound.
+ */
+function notificationSoundEnabled() {
+  return loadSettings().notification_sound_enabled === true;
+}
+
+/**
+ * The currently-selected system sound name, validated against what's installed.
+ * Falls back to the default (then the first available) when the saved value is
+ * missing or no longer present.
+ *
+ * @returns {string} A sound name guaranteed to be in `systemSoundNames()`.
+ */
+function currentNotificationSoundName() {
+  const names = systemSoundNames();
+  const saved = loadSettings().notification_sound_name;
+  if (saved && names.includes(saved)) return saved;
+  if (names.includes(DEFAULT_NOTIFICATION_SOUND)) return DEFAULT_NOTIFICATION_SOUND;
+  return names[0];
+}
+
+/**
+ * Play a macOS system sound by name via `afplay`, fire-and-forget. No-op off
+ * macOS (afplay is macOS-only). Used both for live notifications and for the
+ * menu's pick-to-preview.
+ *
+ * @param {string} name A name from `systemSoundNames()`, e.g. `"Glass"`.
+ */
+function playSystemSound(name) {
+  if (process.platform !== "darwin") return;
+  const file = path.join(SYSTEM_SOUNDS_DIR, `${name}.aiff`);
+  try {
+    // Detached + unref'd so a slow play never holds up app quit.
+    const child = execFile("afplay", [file], (err) => {
+      if (err) console.warn("[omnigent] afplay failed:", err.message);
+    });
+    child.unref();
+  } catch (err) {
+    console.warn("[omnigent] failed to spawn afplay:", err);
+  }
+}
+
+// Per-session sound throttle. The web layer can fire several notifications for
+// one response (a turn that streams in chunks, status that flaps
+// `running`→`idle`→`running`, or repeated tool-approval prompts), each tagged
+// to the same session. The OS already collapses those into a single replaced
+// toast via that tag, but our explicit `afplay` would otherwise sound on every
+// one. Keyed by the notification's target (its navigatePath), so a burst for
+// one session plays once while distinct sessions each still sound.
+const SOUND_THROTTLE_MS = 3000;
+/** @type {Map<string, number>} last play time (ms) keyed by session/target. */
+const lastSoundAtByKey = new Map();
+
+/**
+ * Whether enough time has passed to sound again for `key`. Records "now" and
+ * returns true on the first call for a key (or after the throttle window);
+ * returns false during a burst so repeats for the same session stay quiet.
+ *
+ * @param {string} key Dedup key — the notification's navigatePath, else title.
+ * @returns {boolean}
+ */
+function shouldPlayNotificationSound(key) {
+  const now = Date.now();
+  if (now - (lastSoundAtByKey.get(key) ?? 0) < SOUND_THROTTLE_MS) return false;
+  lastSoundAtByKey.set(key, now);
+  return true;
+}
+
 /**
  * Forget the saved server URL and return the focused window to the bundled
  * setup page so the user can enter a new one. For an ephemeral (debug
@@ -1433,6 +1603,46 @@ function buildMenu() {
     label: "Server",
     submenu: serverSubmenu,
   });
+
+  // Notifications menu (macOS only — sound playback uses `afplay`): an on/off
+  // switch for the notification sound plus a picker of macOS system sounds.
+  // Selections persist in settings.json and are read live by the notify
+  // handler, so a change applies to the next notification without a relaunch.
+  if (isMac) {
+    /** @type {Electron.MenuItemConstructorOptions[]} */
+    const soundChoices = systemSoundNames().map((name) => ({
+      id: `notification_sound_${name}`,
+      label: name,
+      type: "radio",
+      checked: currentNotificationSoundName() === name,
+      click: () => {
+        const settings = loadSettings();
+        settings.notification_sound_name = name;
+        saveSettings(settings);
+        // Pick-to-preview: play the choice immediately so the user hears it,
+        // even when the sound is currently toggled off.
+        playSystemSound(name);
+      },
+    }));
+    template.push({
+      label: "Notifications",
+      submenu: [
+        {
+          id: "notification_sound_enabled",
+          label: "Play Notification Sound",
+          type: "checkbox",
+          checked: notificationSoundEnabled(),
+          click: (item) => {
+            const settings = loadSettings();
+            settings.notification_sound_enabled = item.checked;
+            saveSettings(settings);
+          },
+        },
+        { type: "separator" },
+        { label: "Sound", submenu: soundChoices },
+      ],
+    });
+  }
 
   // Standard roles — these carry the predefined keyboard shortcuts.
   template.push({ role: "fileMenu" });
@@ -1539,6 +1749,64 @@ function isPinnedOriginSender(event) {
   if (originOf(event.senderFrame?.url ?? "") !== pinned) return false;
   // event.sender.getURL() is the webContents' main-frame URL.
   return originOf(event.sender.getURL()) === pinned;
+}
+
+// ---------------------------------------------------------------------------
+// Embedded browser pane
+//
+// The agent's `browser_*` tools drive a native WebContentsView per conversation,
+// positioned over a placeholder the SPA measures. Each window owns its own
+// registry; child views stay sandboxed (nodeIntegration:false, contextIsolation
+// + sandbox true) and detach — not destroy — on hide.
+//
+// `omnigent:browser-execute` runs JS via executeJavaScript; exposed to preload
+// for the relay's fixed templates only, never a generic agent `evaluate`.
+// See preload.js + README.
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the per-conversation WebContentsView registry for a shell window
+ * (positions child views in `win.contentView`, pings back via `win.webContents`).
+ *
+ * @param {BrowserWindow} win The shell window that hosts the browser panes.
+ * @returns {ReturnType<typeof createBrowserViewRegistry>}
+ */
+function createBrowserRegistryForWindow(win) {
+  return createBrowserViewRegistry({
+    WebContentsViewCtor: (opts) => new WebContentsView(opts),
+    createBoundsController: createBrowserViewBoundsController,
+    attachToHost: (view) => win.contentView.addChildView(view),
+    detachFromHost: (view) => win.contentView.removeChildView(view),
+    sendToRenderer: (channel, payload) => {
+      try {
+        win.webContents.send(channel, payload);
+      } catch {
+        /* window torn down */
+      }
+    },
+    // Renderer measures in CSS px; convert to window DIPs using the host
+    // webContents zoom factor (Cmd+/Cmd- changes this out from under us).
+    getHostZoomFactor: () => {
+      try {
+        return win.webContents.getZoomFactor();
+      } catch {
+        return 1;
+      }
+    },
+  });
+}
+
+/**
+ * Look up the browser-view registry for the window that sent an IPC event.
+ * Returns null for unknown windows (torn-down / setup-page senders).
+ *
+ * @param {Electron.IpcMainInvokeEvent} event
+ * @returns {ReturnType<typeof createBrowserViewRegistry> | null}
+ */
+function browserRegistryForSender(event) {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win) return null;
+  return windows.get(win)?.browserRegistry ?? null;
 }
 
 function registerIpc() {
@@ -1757,9 +2025,18 @@ function registerIpc() {
       // isPinnedOriginSender above guarantees a pinned, parseable origin.
       title = `[${new URL(origin).host}] ${title}`;
     }
+    // On macOS we play the notification sound ourselves (afplay, after show())
+    // so the alert is audible in the foreground too — macOS suppresses the
+    // frontmost app's OWN notification sound, so we mute the toast there and
+    // play it explicitly, which also keeps the cue consistent when backgrounded
+    // (no double sound). Off macOS, let the OS play its default sound, gated on
+    // the same enable switch.
+    const isMac = process.platform === "darwin";
+    const soundOn = notificationSoundEnabled();
     const notification = new Notification({
       title,
       body: String(params?.body ?? ""),
+      silent: isMac ? true : !soundOn,
     });
     // In-app path the SPA wants opened on click (e.g. "/c/conv_abc"). Captured
     // here so the click handler can tell the renderer where to route.
@@ -1786,6 +2063,13 @@ function registerIpc() {
     });
     notification.show();
     signalForeground();
+    // Foreground + background audible cue on macOS: play the user's chosen
+    // system sound. macOS muted the toast's own sound above, so this is the one
+    // and only sound. Throttled per session so a chunked/flapping response
+    // sounds once, not once per intermediate notification.
+    if (isMac && soundOn && shouldPlayNotificationSound(navigatePath || title)) {
+      playSystemSound(currentNotificationSoundName());
+    }
     return true;
   });
 
@@ -1928,6 +2212,14 @@ function registerIpc() {
   // polling) — the server-management module owns the subprocess and reports
   // lifecycle changes here.
   serverManager.onChange(broadcastHostStatus);
+
+  // Embedded browser pane — the `omnigent:browser-*` surface lives in
+  // browserIpc.js; the trust gate + per-window registry lookup are injected.
+  registerBrowserIpc({
+    ipcMain,
+    isPinnedOriginSender,
+    getRegistryForEvent: browserRegistryForSender,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1956,9 +2248,22 @@ if (!gotLock) {
     applyDockIcon();
     registerPermissions();
     registerLocalhostAccess();
+    registerSessionExpiryAccess();
     registerWebAuthn();
     registerIpc();
     buildMenu();
+    // Patch PATH for GUI-launched Electron on macOS/Linux:
+    // A desktop launcher inherits a minimal system PATH that omits directories like
+    // /opt/homebrew/bin and ~/.nvm/... where CLI tools (claude, codex, tmux) live.
+    // One synchronous interactive+login shell invocation at startup (`$SHELL -ilc`)
+    // resolves the user's full PATH; we merge it into process.env so every
+    // subsequent spawn/execFile call inherits it. Runs before resolvedCliPath()
+    // (a PATH consumer) and any host spawn, so the ordering guarantee is implicit.
+    const { resolveLoginShellPath, mergePath } = require("./loginShellPath");
+    const _loginPath = resolveLoginShellPath();
+    if (_loginPath) {
+      process.env.PATH = mergePath(process.env.PATH, _loginPath);
+    }
     // Resolve the CLI path once at startup so the first status/control call is
     // instant (primes the in-memory cache in resolvedCliPath); also lets the
     // setup page / Local CLI settings pre-fill the resolved path immediately.

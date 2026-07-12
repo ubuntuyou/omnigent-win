@@ -7,13 +7,13 @@ import os
 import re
 import tarfile
 import uuid
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, Protocol
 
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
@@ -23,12 +23,13 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from omnigent._platform import resolve_repo_symlink
 from omnigent.errors import ErrorCode, OmnigentError
-from omnigent.native_coding_agents import (
+from omnigent.harness_plugins import (
     ANTIGRAVITY_NATIVE_CODING_AGENT,
     CLAUDE_NATIVE_CODING_AGENT,
     CODEX_NATIVE_CODING_AGENT,
     CURSOR_NATIVE_CODING_AGENT,
     GOOSE_NATIVE_CODING_AGENT,
+    HERMES_NATIVE_CODING_AGENT,
     KIMI_NATIVE_CODING_AGENT,
     KIRO_NATIVE_CODING_AGENT,
     OPENCODE_NATIVE_CODING_AGENT,
@@ -44,7 +45,7 @@ from omnigent.runtime import (
 )
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.harnesses.process_manager import HarnessProcessManager
-from omnigent.server.auth import AuthProvider
+from omnigent.server.auth import AuthProvider, SharingMode
 from omnigent.server.managed_hosts import ManagedSandboxConfig
 from omnigent.server.mcp_pool import ServerMcpPool
 from omnigent.server.performance_metrics import (
@@ -59,6 +60,7 @@ from omnigent.server.performance_metrics import (
 from omnigent.server.routes.builtin_agents import create_builtin_agents_router
 from omnigent.server.routes.comments import create_comments_router
 from omnigent.server.routes.default_policies import create_default_policies_router
+from omnigent.server.routes.harnesses import create_harnesses_router
 from omnigent.server.routes.policy_registry import create_policy_registry_router
 from omnigent.server.routes.runner_tunnel import create_runner_tunnel_router
 from omnigent.server.routes.session_mcp_servers import create_session_mcp_servers_router
@@ -68,6 +70,7 @@ from omnigent.server.routes.sessions import (
     create_sessions_router,
     set_server_runner_router,
 )
+from omnigent.server.routes.sharing import create_sharing_router
 from omnigent.server.routes.terminal_attach import create_terminal_attach_router
 from omnigent.server.ws_origin import WebSocketOriginMiddleware
 from omnigent.stores import (
@@ -85,83 +88,15 @@ from omnigent.stores.policy_store import PolicyStore
 _logger = logging.getLogger(__name__)
 
 
-def _is_pep440_version(version: str) -> bool:
-    """Return whether *version* can be parsed as a PEP 440 version."""
-    from packaging.version import InvalidVersion, Version
-
-    try:
-        Version(version)
-    except InvalidVersion:
-        return False
-    return True
-
-
-def _metadata_omnigent_version() -> str:
-    """Return the omnigent version recorded in installed package metadata."""
-    from importlib.metadata import version as _pkg_version
-
-    return _pkg_version("omnigent")
-
-
-def _source_pyproject_version(start: Path | None = None) -> str | None:
-    """Return ``[project].version`` from a source checkout's ``pyproject.toml``."""
-    import tomllib
-
-    current = start or Path(__file__).resolve()
-    for parent in (current, *current.parents):
-        pyproject = parent / "pyproject.toml"
-        if not pyproject.is_file():
-            continue
-        try:
-            data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-        except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
-            _logger.warning(
-                "could not read %s for server version fallback (%s)",
-                pyproject,
-                exc,
-            )
-            return None
-        project = data.get("project")
-        if not isinstance(project, dict) or project.get("name") != "omnigent":
-            continue
-        version = project.get("version")
-        if not isinstance(version, str) or not version:
-            return None
-        if not _is_pep440_version(version):
-            _logger.warning(
-                "pyproject version %r from %s is not PEP 440",
-                version,
-                pyproject,
-            )
-            return None
-        return version
-    return None
-
-
 def _server_version() -> str:
     """Return the server version exposed to clients.
 
-    Source/editable installs can have placeholder package metadata such as
-    ``source``. Prefer the installed metadata when it is parseable, but fall
-    back to the source checkout's ``pyproject.toml`` version so local developer
-    servers still report a PEP 440 version.
+    Reads :data:`omnigent.version.VERSION`, the single source of truth shared
+    with the CLI and the host/runner hello frames.
     """
-    version = _metadata_omnigent_version()
-    if _is_pep440_version(version):
-        return version
-    fallback = _source_pyproject_version()
-    if fallback is not None:
-        _logger.info(
-            "installed omnigent version %r is not PEP 440; using pyproject version %s",
-            version,
-            fallback,
-        )
-        return fallback
-    _logger.warning(
-        "installed omnigent version %r is not PEP 440 and no pyproject fallback was found",
-        version,
-    )
-    return version
+    from omnigent.version import VERSION
+
+    return VERSION
 
 
 def _register_web_mimetypes() -> None:
@@ -183,13 +118,28 @@ def _register_web_mimetypes() -> None:
         (".map", "application/json"),
         (".wasm", "application/wasm"),
         (".svg", "image/svg+xml"),
+        # Python's mimetypes DB has no ``.webmanifest`` entry, so without this
+        # Starlette serves the PWA manifest as ``application/octet-stream`` and
+        # browsers silently refuse to install the app.
+        (".webmanifest", "application/manifest+json"),
     ):
         mimetypes.add_type(ctype, ext)
 
 
 _register_web_mimetypes()
 
-_WEB_UI_DIST = Path(__file__).parent / "static" / "web-ui"
+# Default: the SPA bundled into the installed wheel's package data. A deploy
+# that ships the SPA outside the wheel (e.g. as loose files in the app source
+# tree, to keep the wheel under a per-file size cap) can point here instead via
+# OMNIGENT_WEB_UI_DIST, without rebuilding or repackaging.
+_WEB_UI_DIST = Path(
+    os.environ.get("OMNIGENT_WEB_UI_DIST") or (Path(__file__).parent / "static" / "web-ui")
+)
+# Static explainer served at "/" when no web UI bundle is present (an API-only
+# build, or an install that skipped the web UI). Kept as a file rather than an
+# inline string so it doesn't clutter the app definition; it's pure static
+# markup with no interpolation. Shipped via package-data in pyproject.toml.
+_API_ONLY_LANDING_HTML = Path(__file__).parent / "static" / "api_only_landing.html"
 _WEB_UI_HTML_CACHE_CONTROL = "no-cache"
 _WEB_UI_ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable"
 _WEB_UI_STATIC_CACHE_CONTROL = "public, max-age=3600"
@@ -202,6 +152,8 @@ _OPENCODE_NATIVE_AGENT_NAME = OPENCODE_NATIVE_CODING_AGENT.agent_name
 _CURSOR_NATIVE_AGENT_NAME = CURSOR_NATIVE_CODING_AGENT.agent_name
 _GOOSE_NATIVE_AGENT_NAME = GOOSE_NATIVE_CODING_AGENT.agent_name
 _KIRO_NATIVE_AGENT_NAME = KIRO_NATIVE_CODING_AGENT.agent_name
+_GOOSE_NATIVE_AGENT_NAME = GOOSE_NATIVE_CODING_AGENT.agent_name
+_HERMES_NATIVE_AGENT_NAME = HERMES_NATIVE_CODING_AGENT.agent_name
 _ANTIGRAVITY_NATIVE_AGENT_NAME = ANTIGRAVITY_NATIVE_CODING_AGENT.agent_name
 _QWEN_NATIVE_AGENT_NAME = QWEN_NATIVE_CODING_AGENT.agent_name
 _KIMI_NATIVE_AGENT_NAME = KIMI_NATIVE_CODING_AGENT.agent_name
@@ -486,6 +438,8 @@ def _ensure_default_agents(
     _ensure_default_cursor_agent(agent_store, artifact_store, agent_cache)
     _ensure_default_goose_agent(agent_store, artifact_store, agent_cache)
     _ensure_default_kiro_agent(agent_store, artifact_store, agent_cache)
+    _ensure_default_goose_agent(agent_store, artifact_store, agent_cache)
+    _ensure_default_hermes_agent(agent_store, artifact_store, agent_cache)
     _ensure_default_antigravity_agent(agent_store, artifact_store, agent_cache)
     _ensure_default_qwen_agent(agent_store, artifact_store, agent_cache)
     _ensure_default_kimi_native_agent(agent_store, artifact_store, agent_cache)
@@ -850,6 +804,62 @@ def _ensure_default_kiro_agent(
     )
 
 
+def _build_goose_native_bundle() -> bytes:
+    """Build a gzipped tarball of the goose-native-ui agent spec."""
+    import tempfile
+
+    from omnigent.goose_native import _materialize_goose_agent_spec
+    from omnigent.spec import materialize_bundle
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        spec_path = _materialize_goose_agent_spec(Path(tmpdir))
+        bundle_dir = materialize_bundle(spec_path, Path(tmpdir) / "bundle")
+        return _tar_gz_dir(bundle_dir)
+
+
+def _ensure_default_goose_agent(
+    agent_store: AgentStore,
+    artifact_store: ArtifactStore,
+    agent_cache: Any,
+) -> None:
+    """Register or refresh the goose-native-ui agent."""
+    _ensure_builtin_agent(
+        agent_store,
+        artifact_store,
+        agent_cache,
+        name=_GOOSE_NATIVE_AGENT_NAME,
+        bundle_bytes=_build_goose_native_bundle(),
+    )
+
+
+def _build_hermes_native_bundle() -> bytes:
+    """Build a gzipped tarball of the hermes-native-ui agent spec."""
+    import tempfile
+
+    from omnigent.hermes_native import _materialize_hermes_agent_spec
+    from omnigent.spec import materialize_bundle
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        spec_path = _materialize_hermes_agent_spec(Path(tmpdir))
+        bundle_dir = materialize_bundle(spec_path, Path(tmpdir) / "bundle")
+        return _tar_gz_dir(bundle_dir)
+
+
+def _ensure_default_hermes_agent(
+    agent_store: AgentStore,
+    artifact_store: ArtifactStore,
+    agent_cache: Any,
+) -> None:
+    """Register or refresh the hermes-native-ui agent."""
+    _ensure_builtin_agent(
+        agent_store,
+        artifact_store,
+        agent_cache,
+        name=_HERMES_NATIVE_AGENT_NAME,
+        bundle_bytes=_build_hermes_native_bundle(),
+    )
+
+
 def _ensure_default_antigravity_agent(
     agent_store: AgentStore,
     artifact_store: ArtifactStore,
@@ -1113,6 +1123,8 @@ def create_app(
     admins: list[str] | None = None,
     allowed_domains: list[str] | None = None,
     sandbox_config: ManagedSandboxConfig | None = None,
+    sharing_mode: SharingMode | Callable[[], SharingMode] | None = None,
+    public_sharing: bool | Callable[[], bool] | None = None,
 ) -> FastAPI:
     """
     Build and return the FastAPI application with all routes mounted.
@@ -1170,6 +1182,34 @@ def create_app(
         ``host_type="managed"`` create fails with a clear error).
         Managed-host credentials live on the ``hosts`` table, so no
         extra store is wired.
+    :param sharing_mode: Server policy for creating new session
+        permission grants (see :class:`SharingMode`): ``ON`` allows
+        grants at any level plus public/workspace read, ``READ_ONLY``
+        caps grants at read (edit/manage rejected with 403),
+        ``RESTRICTED_READ_ONLY`` additionally blocks sharing a session
+        whose working directory is a home or root directory, and ``OFF``
+        rejects all new grants (403). Only *new* grants are gated —
+        revoke/list, self-ownership grants, and existing grants are
+        unaffected in every mode. Accepts a static :class:`SharingMode`,
+        a zero-arg callable resolved per request (for deployments that
+        flip the policy at runtime), or ``None`` — which defaults from
+        the ``OMNIGENT_SHARING_MODE`` env var
+        (``on``/``read_only``/``restricted_read_only``/``off``), failing
+        open to ``ON`` when unset or unrecognized. Reported by
+        ``GET /v1/info`` as ``sharing_mode`` so the web app can gate its
+        Share controls to match.
+    :param public_sharing: Whether public (anyone-with-the-link) read
+        access may be granted — i.e. whether the ``__public__`` grant is
+        allowed. Orthogonal to ``sharing_mode``: a server can keep normal
+        user-to-user sharing on while disabling public links. When
+        disabled, granting ``__public__`` is rejected (403) and the Share
+        modal hides the "Public access" toggle; existing public grants
+        are unaffected. Accepts a static bool, a zero-arg callable
+        resolved per request, or ``None`` — which defaults from the
+        ``OMNIGENT_PUBLIC_SHARING`` env var (enabled unless explicitly
+        falsy — ``0``/``false``/``no``/``off``), failing open to enabled
+        when unset. Reported by ``GET /v1/info`` as
+        ``public_sharing_enabled``.
     :returns: A fully configured :class:`FastAPI` application.
     :raises ValueError: If ``permission_store`` is provided
         without an ``auth_provider``.
@@ -1391,6 +1431,73 @@ def create_app(
     app.state.host_registry = host_registry
     app.state.host_store = host_store
     app.state.sandbox_config = sandbox_config
+    # Admin roster: the config ``admins:`` list (canonical) union'd with the
+    # runtime-editable ``<data_dir>/admins`` file. Built once here so BOTH the
+    # admin-gated auth routes AND ``/v1/me``'s is_admin computation consult the
+    # same source — otherwise an identity listed in the file but not yet
+    # promoted (``promote_if_listed`` runs at login) would be authorized by the
+    # routes yet see no admin chrome. The file portion lazily reloads on mtime
+    # change (no restart).
+    from omnigent.server.admin_list import load_admin_list
+
+    admin_list = load_admin_list(extra=frozenset(admins or ()))
+    # Session-sharing policy, normalized to a per-request callable, plus a
+    # ``sharing_mode_writable`` flag gating the admin ``PUT /v1/sharing``
+    # endpoint.
+    #
+    # ``None`` (the OSS default): ``OMNIGENT_SHARING_MODE`` sets the boot
+    # default, but an admin-set override file (``<data_dir>/sharing_mode``,
+    # written from Settings → Sharing) takes precedence when present — read per
+    # request so a change applies without a restart. Editable here.
+    #
+    # A static value or a callable (managed/embedded deploys, e.g. a Databricks
+    # SAFE flag) is authoritative and NOT editable via the admin endpoint.
+    if sharing_mode is None:
+        from omnigent.server.sharing_settings import read_sharing_mode_override
+
+        _sharing_env_default = SharingMode.coerce(os.environ.get("OMNIGENT_SHARING_MODE"))
+
+        def _resolve_sharing_mode() -> SharingMode:
+            override = read_sharing_mode_override()
+            return override if override is not None else _sharing_env_default
+
+        app.state.sharing_mode = _resolve_sharing_mode
+        app.state.sharing_mode_writable = True
+    elif callable(sharing_mode):
+        _sharing_callable = sharing_mode
+        app.state.sharing_mode = lambda: SharingMode.coerce(_sharing_callable())
+        app.state.sharing_mode_writable = False
+    else:
+        _sharing_static = SharingMode.coerce(sharing_mode)
+        app.state.sharing_mode = lambda: _sharing_static
+        app.state.sharing_mode_writable = False
+    # Public (anyone-with-the-link) access policy, same shape as sharing_mode
+    # above and independent of it. ``None`` reads ``OMNIGENT_PUBLIC_SHARING``
+    # (default enabled) with a ``<data_dir>/public_sharing`` file override,
+    # editable from the admin panel; a static bool or callable is authoritative
+    # and not editable there.
+    if public_sharing is None:
+        from omnigent.server.sharing_settings import (
+            public_sharing_env_default,
+            read_public_sharing_override,
+        )
+
+        _public_env_default = public_sharing_env_default()
+
+        def _resolve_public_sharing() -> bool:
+            override = read_public_sharing_override()
+            return override if override is not None else _public_env_default
+
+        app.state.public_sharing = _resolve_public_sharing
+        app.state.public_sharing_writable = True
+    elif callable(public_sharing):
+        _public_callable = public_sharing
+        app.state.public_sharing = lambda: bool(_public_callable())
+        app.state.public_sharing_writable = False
+    else:
+        _public_static = bool(public_sharing)
+        app.state.public_sharing = lambda: _public_static
+        app.state.public_sharing_writable = False
     # Tracks in-flight background managed-host launches (POST
     # /v1/sessions returns before the sandbox exists) so a message
     # racing the provision can rendezvous instead of failing with
@@ -1847,6 +1954,15 @@ def create_app(
         # actually offered; None when no provider is named (embedding
         # configs may leave it unset) so the UI keeps the generic label.
         sandbox_provider = sandbox_config.provider if managed_sandboxes_enabled else None
+        # sharing_mode is the server's session-sharing policy
+        # (on/read_only/off), surfaced so the web app can hide the Share
+        # control (off) or restrict it to read-only (read_only) in lockstep
+        # with the server-side grant gate.
+        sharing_mode = app.state.sharing_mode()
+        # public_sharing_enabled: whether the __public__ (anyone-with-the-link)
+        # grant is allowed. Independent of sharing_mode — drives whether the
+        # Share modal shows the "Public access" toggle.
+        public_sharing_enabled = app.state.public_sharing()
         # server_version is the installed omnigent package version (same
         # source as /api/version), surfaced so the web UI can show it in the
         # session info popover alongside the per-session host version.
@@ -1870,26 +1986,34 @@ def create_app(
             "databricks_features": databricks_features,
             "managed_sandboxes_enabled": managed_sandboxes_enabled,
             "sandbox_provider": sandbox_provider,
+            "sharing_mode": sharing_mode.value,
+            "public_sharing_enabled": public_sharing_enabled,
             "server_version": _server_version(),
             "smart_routing_enabled": smart_routing_enabled,
         }
 
     @app.get("/v1/me", response_model=None)  # Union return type (dict | JSONResponse)
-    async def me(request: Request) -> dict[str, str | None] | JSONResponse:
+    async def me(request: Request) -> dict[str, str | bool | None] | JSONResponse:
         """Return the current user's identity.
 
         Reads the user from the auth provider (same logic that
         session routes use). The frontend calls this on load to
         discover who it is.
 
+        Also returns ``is_admin`` — the mode-agnostic admin signal
+        (the shared ``users.is_admin`` column, set by the admin-list
+        promotion at login). The SPA gates admin chrome on it in
+        EVERY mode, including OIDC/SSO where the accounts-only
+        ``/auth/me`` endpoint does not exist.
+
         When OIDC is active and the user is unauthenticated,
         returns 401 with a ``login_url`` so the frontend knows
         where to redirect.
 
         :param request: The incoming FastAPI request.
-        :returns: ``{"user_id": "alice@example.com"}``,
-            ``{"user_id": null}`` if unauthenticated in header
-            mode, or 401 with ``login_url`` in OIDC mode.
+        :returns: ``{"user_id": "alice@example.com", "is_admin": true}``,
+            ``{"user_id": null, "is_admin": false}`` if unauthenticated
+            in header mode, or 401 with ``login_url`` in OIDC mode.
         """
         user_id: str | None = None
         if auth_provider is not None:
@@ -1900,7 +2024,17 @@ def create_app(
                 status_code=401,
                 content={"user_id": None, "login_url": login_url},
             )
-        return {"user_id": user_id}
+        # Mirror the admin check the auth routes use
+        # (``permission_store.is_admin(caller) or admin_list.is_admin(caller)``)
+        # so the SPA's admin chrome never under-reports relative to what the
+        # endpoints actually authorize — e.g. for an identity added to the
+        # admin-list file who hasn't re-logged-in yet (so ``promote_if_listed``
+        # hasn't flipped the DB flag).
+        is_admin = user_id is not None and (
+            (permission_store is not None and permission_store.is_admin(user_id))
+            or admin_list.is_admin(user_id)
+        )
+        return {"user_id": user_id, "is_admin": is_admin}
 
     app.include_router(
         create_sessions_router(
@@ -1942,6 +2076,11 @@ def create_app(
         ),
         prefix="/v1",
         tags=["agents"],
+    )
+    app.include_router(
+        create_harnesses_router(auth_provider=auth_provider),
+        prefix="/v1",
+        tags=["harnesses"],
     )
     app.include_router(
         create_terminal_attach_router(
@@ -2001,6 +2140,17 @@ def create_app(
         prefix="/v1",
         tags=["policy_registry"],
     )
+    # Admin control for the server-wide sharing settings. Always mounted (the
+    # handlers self-gate on admin); PUT is a no-op-reject unless this server
+    # resolves the setting from the editable file-backed default.
+    app.include_router(
+        create_sharing_router(
+            auth_provider=auth_provider,
+            permission_store=permission_store,
+        ),
+        prefix="/v1",
+        tags=["sharing"],
+    )
 
     # ── Tunnel lifecycle callbacks (Step 8.5 crash recovery) ───
     async def _on_runner_disconnect(runner_id: str) -> None:
@@ -2020,6 +2170,25 @@ def create_app(
             _publish_status,
             _session_status_cache,
         )
+
+        # Newest-wins guard: a superseded tunnel's teardown fires this
+        # hook after a fresh tunnel for the same ``runner_id`` already
+        # registered (``TunnelRegistry.register`` retires the old
+        # session, whose helper tasks then error out and run this
+        # teardown). Marking the runner's sessions ``failed`` here would
+        # clobber the live tunnel's recovery: reconnect-recovery
+        # (``_on_runner_connect`` -> ``_publish_runner_recovered_status``)
+        # may have just cleared a stale ``runner_disconnected`` failure,
+        # and this stale disconnect would silently re-fail the session.
+        # If a live tunnel is registered for this runner, the runner is
+        # NOT offline, so skip. Mirrors the registry's own
+        # generation-guarded ``deregister``.
+        if tunnel_registry.get(runner_id) is not None:
+            _logger.info(
+                "Runner %s disconnect superseded by a live tunnel; skipping offline-marking",
+                runner_id,
+            )
+            return
 
         # Direct by-runner lookup: read-after-write consistent (the
         # listing path may be served from an eventually-consistent
@@ -2092,7 +2261,10 @@ def create_app(
 
         :param runner_id: The reconnecting runner's id.
         """
-        from omnigent.server.routes.sessions import _ensure_runner_relay
+        from omnigent.server.routes.sessions import (
+            _ensure_runner_relay,
+            _publish_runner_recovered_status,
+        )
 
         # Direct by-runner lookup instead of list-everything-and-filter:
         # the listing path may be backed by an eventually-consistent
@@ -2156,6 +2328,19 @@ def create_app(
                 runner_id,
                 routed.client,
                 conversation_store,
+            )
+            # A reconnect can land the runner back on an idle session with
+            # no new turn (a transient WS blip; the runner process
+            # survived). The disconnect left the session marked failed with
+            # persisted ``runner_disconnected`` labels, and without a
+            # ``running`` edge nothing clears them — the Subagents panel
+            # keeps the grey "Disconnected" dot until the next user
+            # message. Clearing on reconnect drops it as soon as the runner
+            # is reachable again. The helper self-guards: it only clears a
+            # session whose persisted failure is ``runner_disconnected``, so
+            # a genuine task failure survives the reconnect untouched.
+            await _publish_runner_recovered_status(
+                conv.id, conversation_store, require_disconnect_code=True
             )
 
     def _resolve_managed_runner_owner(runner_id: str) -> str | None:
@@ -2236,16 +2421,12 @@ def create_app(
     # Must be registered BEFORE the SPA static mount because the SPA's
     # HTML5-history fallback catches all unmatched extensionless paths.
     if auth_provider is not None and getattr(auth_provider, "login_url", None):
-        from omnigent.server.admin_list import load_admin_list
         from omnigent.server.auth import UnifiedAuthProvider
 
-        # Admin roster: the config ``admins:`` list (canonical) union'd
-        # with the runtime-editable ``<data_dir>/admins`` file. Consulted
-        # on each login to promote listed identities — the only admin
-        # path for OIDC, and an additive convenience for accounts. The
-        # file portion lazily reloads on mtime change (no restart).
-        admin_list = load_admin_list(extra=frozenset(admins or ()))
-
+        # ``admin_list`` is built once near app creation (see above) so the
+        # auth routes and ``/v1/me`` share one roster. Consulted on each login
+        # to promote listed identities — the only admin path for OIDC, and an
+        # additive convenience for accounts.
         if (
             isinstance(auth_provider, UnifiedAuthProvider)
             and auth_provider._source == "accounts"
@@ -2315,7 +2496,8 @@ def create_app(
             app.include_router(router, prefix=prefix, tags=tags)
 
     web_ui_dist = _WEB_UI_DIST
-    if web_ui_dist.is_dir() and (web_ui_dist / "index.html").is_file():
+    web_ui_present = web_ui_dist.is_dir() and (web_ui_dist / "index.html").is_file()
+    if web_ui_present:
         app.mount(
             "/",
             _RangeAwareGZipMiddleware(
@@ -2325,26 +2507,16 @@ def create_app(
             name="web-ui",
         )
     else:
+        # No SPA bundle (API-only build, or an install that skipped the web
+        # UI). The "/" route isn't used for anything else, so just always serve
+        # a short HTML explainer there with a 200 — no content negotiation. A
+        # normal install bundles the UI and the static mount above owns "/", so
+        # this only applies to API-only servers.
 
         @app.get("/", include_in_schema=False)
-        async def root() -> dict[str, str]:
-            """
-            Return API server metadata when no web UI build is bundled.
-
-            Databricks Apps opens the app URL at ``/`` in a browser.
-            API-only wheels intentionally omit the SPA assets, so serve
-            a small JSON landing response instead of FastAPI's generic
-            404. When a web UI build is present, the static mount above
-            owns ``/`` and this fallback is not registered.
-
-            :returns: Service metadata with health and docs paths.
-            """
-            return {
-                "service": "omnigent",
-                "status": "ok",
-                "health": "/health",
-                "docs": "/docs",
-            }
+        async def root() -> FileResponse:
+            """Serve the API-only landing page (no web UI bundle present)."""
+            return FileResponse(_API_ONLY_LANDING_HTML, media_type="text/html")
 
     return app
 
@@ -2474,6 +2646,11 @@ def _apply_web_ui_cache_headers(response: Response, path: str) -> Response:
     media_type = content_type.partition(";")[0].lower() if content_type is not None else None
     if path.startswith("assets/"):
         response.headers["Cache-Control"] = _WEB_UI_ASSET_CACHE_CONTROL
+    elif path in {"sw.js", "version.json"}:
+        # The service worker and the version sentinel it precaches must
+        # revalidate on every load, or the HTTP cache could mask a deploy for up
+        # to an hour and defeat prompt-to-reload.
+        response.headers["Cache-Control"] = _WEB_UI_HTML_CACHE_CONTROL
     elif media_type == "text/html" or path in {"", ".", "index.html"}:
         response.headers["Cache-Control"] = _WEB_UI_HTML_CACHE_CONTROL
     else:

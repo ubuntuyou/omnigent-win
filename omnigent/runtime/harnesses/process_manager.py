@@ -37,6 +37,7 @@ from pathlib import Path
 import httpx
 
 from omnigent._platform import IS_WINDOWS
+from omnigent.harness_plugins import missing_install_packages
 from omnigent.inner import _proc
 from omnigent.inner._subprocess_lifecycle import close_subprocess_transport
 from omnigent.runner.identity import strip_runner_auth_secrets
@@ -238,6 +239,15 @@ def _resolve_module_path(harness: str) -> str:
     module_path = _HARNESS_MODULES.get(harness)
     if module_path is not None:
         return module_path
+    # Generic-ACP ids (``acp:<slug>``) all resolve to the base ``acp`` module;
+    # the slug selecting the concrete agent is read from the spec at spawn.
+    if harness.startswith("acp:"):
+        acp_module = _HARNESS_MODULES.get("acp")
+        if acp_module is not None:
+            return acp_module
+    package = missing_install_packages().get(harness)
+    if package:
+        raise RuntimeError(f"unknown harness {harness!r}; install `{package}` to add this harness")
     if _HARNESS_MODULES:
         registered = sorted(_HARNESS_MODULES)
         raise RuntimeError(f"unknown harness {harness!r}; registered names: {registered}")
@@ -891,12 +901,23 @@ class HarnessProcessManager:
         """
         self._in_flight_response_ids.pop(conversation_id, None)
 
-    async def release(self, conversation_id: str) -> None:
+    async def release(
+        self, conversation_id: str, *, only_if_idle_cutoff: float | None = None
+    ) -> None:
         """
         Terminate and unregister the subprocess for a conversation.
 
         Called when the conversation reaches a terminal state. No-op
         if no subprocess is registered for the id.
+
+        ``only_if_idle_cutoff`` (the idle reaper's pass cutoff) makes the
+        release conditional: the entry is torn down only if it is still
+        idle — untouched since the cutoff and with no turn in flight.
+        The check happens under the registry lock, atomically with the
+        unregister, so a turn that starts while an earlier entry in the
+        same reaper pass tears down can never be killed mid-flight
+        (mirrors ``pane_reaper``'s busy re-check immediately before
+        teardown).
 
         Note: ``_spawn_locks[conversation_id]`` is intentionally NOT
         removed here. If we removed it, a concurrent caller already
@@ -913,6 +934,19 @@ class HarnessProcessManager:
         :param conversation_id: AP-allocated conversation id.
         """
         async with self._registry_lock:
+            if only_if_idle_cutoff is not None:
+                current = self._entries.get(conversation_id)
+                if (
+                    current is None
+                    or current.last_used_at > only_if_idle_cutoff
+                    or conversation_id in self._in_flight_response_ids
+                ):
+                    _logger.info(
+                        "skipping idle reap for conversation %s: entry became "
+                        "active or was already released during the pass",
+                        conversation_id,
+                    )
+                    return
             entry = self._entries.pop(conversation_id, None)
             # NOTE: ``_spawn_locks[conversation_id]`` intentionally
             # NOT popped — see this method's docstring for the
@@ -1082,25 +1116,43 @@ class HarnessProcessManager:
         Close the httpx client, terminate the subprocess, and
         remove its socket file.
 
+        Teardown is best-effort and ordered so the process kill — the
+        step that actually reclaims the OS resource — always runs even
+        if an earlier step raises. ``release`` has already popped the
+        entry from ``_entries`` before calling this, so a bare
+        ``client.aclose()`` raise (a broken transport, a wedged client)
+        that skipped the kill would otherwise leak an *un-tracked*
+        subprocess. ``CancelledError`` (a ``BaseException``, not
+        ``Exception``) still propagates, so shutdown cancellation is
+        unaffected.
+
         :param entry: The bookkeeping record to tear down.
         """
-        await entry.client.aclose()
-        if entry.process.returncode is None:
-            try:
-                entry.process.send_signal(signal.SIGTERM)
-                await asyncio.wait_for(entry.process.wait(), timeout=_RELEASE_GRACE_S)
-            except asyncio.TimeoutError:
-                # Wedged subprocess — kill outright. The harness
-                # author is responsible for clean SIGTERM handling
-                # if they want graceful shutdown of in-flight
-                # responses.
-                entry.process.kill()
-                await entry.process.wait()
-        close_subprocess_transport(entry.process)
-        # Best-effort socket cleanup. uvicorn's atexit usually
-        # handles this when SIGTERM lands cleanly, but a
-        # hard-killed runner won't. No-op for TCP endpoints.
-        entry.endpoint.cleanup()
+        try:
+            await entry.client.aclose()
+        except Exception:
+            # A broken transport must not skip the subprocess kill below.
+            _logger.exception("error closing harness client during teardown; continuing")
+        finally:
+            if entry.process.returncode is None:
+                try:
+                    entry.process.send_signal(signal.SIGTERM)
+                    await asyncio.wait_for(entry.process.wait(), timeout=_RELEASE_GRACE_S)
+                except Exception:
+                    # Graceful SIGTERM didn't complete — it timed out, or
+                    # send_signal/wait raised (e.g. the process vanished
+                    # mid-teardown). Force-kill best-effort; a process that
+                    # is already gone is already done.
+                    with contextlib.suppress(Exception):
+                        entry.process.kill()
+                        await entry.process.wait()
+            with contextlib.suppress(Exception):
+                close_subprocess_transport(entry.process)
+            # Best-effort socket cleanup. uvicorn's atexit usually
+            # handles this when SIGTERM lands cleanly, but a
+            # hard-killed runner won't. No-op for TCP endpoints.
+            with contextlib.suppress(Exception):
+                entry.endpoint.cleanup()
 
     async def _idle_reaper_loop(self) -> None:
         """
@@ -1170,7 +1222,11 @@ class HarnessProcessManager:
                     conv_id,
                 )
                 try:
-                    await self.release(conv_id)
+                    # Teardown of earlier entries in this pass yields the
+                    # loop, so the snapshot above can be stale by the time
+                    # this entry's turn comes — release re-checks idleness
+                    # atomically with the unregister.
+                    await self.release(conv_id, only_if_idle_cutoff=cutoff)
                 except Exception:
                     # A release failure (e.g. ``client.aclose()`` on a broken
                     # transport, or ``process.wait()`` raising) must not escape
@@ -1334,13 +1390,16 @@ async def _pids_holding_socket(socket_path: Path) -> list[int]:
     :returns: List of holding PIDs (often a single one — the
         bound runner).
     """
-    proc = await asyncio.create_subprocess_exec(
-        "lsof",
-        "-t",
-        str(socket_path),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "lsof",
+            "-t",
+            str(socket_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except OSError:
+        return []
     stdout, _ = await proc.communicate()
     if proc.returncode != 0:
         return []

@@ -23,7 +23,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { AgentInfoButton } from "@/components/AgentInfo";
 import { PresenceAvatars } from "@/components/PresenceAvatars";
-import { HostBadge } from "@/components/HostBadge";
 import type { Agent } from "@/hooks/useAgents";
 import { cn } from "@/lib/utils";
 import { TAB_BADGE_BASE } from "./railTabs";
@@ -143,7 +142,7 @@ interface ChatHeaderProps {
  * canvas shows through, and chat content dissolves before it slides
  * under the controls (the conversation viewport's ``chat-scroll-fade``
  * mask, index.css; chat reserves clearance via ``pt-20``,
- * terminal-first via ``pt-16``). Left slot: open-sidebar +
+ * terminal-first via ``pt-14``). Left slot: open-sidebar +
  * back-to-parent. Right slot: desktop action buttons (Agent info ·
  * Share · right-panel toggle), a mobile three-dot menu mirroring the
  * same actions, and a mobile FAB that opens the rail tabs as
@@ -178,7 +177,7 @@ export function ChatHeader({
       className={cn(
         // h-14 fixes the bar at 56px: 12px symmetric vertical padding around
         // the 32px controls. No own background — the app canvas shows
-        // through (a scrim can't track the canvas gradient; see #3010).
+        // through (a scrim can't track the canvas gradient).
         // Scrolled chat text can't render through the controls because the
         // conversation viewport fades its top edge instead (chat-scroll-fade
         // in index.css, applied in ChatPage).
@@ -215,7 +214,6 @@ export function ChatHeader({
             <TooltipContent side="bottom">Open sidebar</TooltipContent>
           </Tooltip>
         )}
-        {!isChildSession && conversationId && <HostBadge sessionId={conversationId} />}
         {isChildSession && parentSessionId && (
           <>
             {/* Back affordance. Ghost (not a filled pill) so it sits on the
