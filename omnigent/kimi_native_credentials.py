@@ -71,7 +71,15 @@ def render_kimi_hooks_toml(*, bridge_dir: Path, python_executable: str | None = 
     perm = f"{base} permission-request --bridge-dir {bridge}"
     # No ``matcher`` → matches every tool. Commands are TOML basic strings;
     # shlex.quote yields single-quoted POSIX tokens, which contain no double
-    # quotes or backslashes, so they embed in a "..." TOML string verbatim.
+    # quotes or backslashes on POSIX, so they embed in a "..." TOML string
+    # verbatim. On Windows, ``python`` and ``bridge_dir`` are native paths
+    # (backslash-separated), and shlex.quote (POSIX-only) does not escape
+    # backslashes — they'd reach the TOML basic string raw, where TOML reads
+    # ``\U``/``\o``/etc. as (invalid) unicode escapes and fails to parse.
+    # Escape for TOML basic-string embedding; a no-op on POSIX paths, which
+    # contain neither backslashes nor double quotes.
+    pre = pre.replace("\\", "\\\\").replace('"', '\\"')
+    perm = perm.replace("\\", "\\\\").replace('"', '\\"')
     #
     # ``timeout`` is required: kimi's DEFAULT_HOOK_TIMEOUT_SECONDS is 30s, which
     # would kill the permission hook while it long-polls the web verdict (so the

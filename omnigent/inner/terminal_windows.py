@@ -970,6 +970,14 @@ class _InjectionServer:
         # Gate on prompt readiness so the first message of a fresh session is
         # not typed into a still-booting TUI and dropped.
         await self._instance.wait_until_ready(timeout_s=float(req.get("timeout_s", 30.0)))
+        if kind == "keys":
+            # Generic literal-keys path (added for kimi's numbered permission
+            # menu): types *content* verbatim, no draft-clear and no bracketed-
+            # paste framing — a paste would make the TUI treat a menu digit as
+            # chat data instead of a keystroke. Unlike "slash" there is no
+            # leading C-u: a permission menu has no draft to clear.
+            self._instance.inject_payload(content)
+            return True, None
         if kind == "slash":
             # Slash commands (/compact, /effort, /model) are typed literally,
             # not bracket-pasted — see WindowsTerminalInstance.inject_slash_command.
